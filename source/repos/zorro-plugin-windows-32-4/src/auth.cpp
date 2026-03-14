@@ -706,24 +706,19 @@ bool Login(const char* user, const char* pwd, const char* type) {
     // Step 3: Load saved token (also loads client_id/secret from token file)
     bool hasToken = LoadToken();
 
-    // Step 3a: Hardcoded token fallback (if no CSV and no saved token)
-    if (!hasToken && strlen(G.accessToken) < 10) {
-        strcpy_s(G.accessToken, "22088_18UMbjtDBgRCBlzS9ktuLH28xgTeWdCSRQjLWueVAokFItt8qU");
-        strcpy_s(G.refreshToken, "QWFka9W2Ta2APgHH0aC1pv81XOcmY78L6pfkM3mcZQl9qrV7Qe");
-        hasToken = true;
-        Log::Info("AUTH", "Using hardcoded access token (%.20s...)", G.accessToken);
+    // Step 3a: Built-in Client ID / Secret (cTrader OpenAPI app "zorro bridge")
+    if (strlen(G.clientId) < 5) {
+        strcpy_s(G.clientId, "22088_18UMbjtDBgRCBlzS9ktuLH28xgTeWdCSRQjLWueVAokFItt8qU");
+        Log::Info("AUTH", "Using built-in Client ID");
+    }
+    if (strlen(G.clientSecret) < 5) {
+        strcpy_s(G.clientSecret, "QWFka9W2Ta2APgHH0aC1pv81XOcmY78L6pfkM3mcZQl9qrV7Qe");
+        Log::Info("AUTH", "Using built-in Client Secret");
     }
 
-    // If CSV failed and no token, we have nothing
+    // If no CSV and no token, OAuth flow will handle it (clientId/clientSecret are built-in)
     if (!csvOk && !hasToken) {
-        Log::Error("AUTH", "No credentials: CSV not found and no saved token");
-        return false;
-    }
-
-    // Must have clientId/clientSecret at this point (from CSV or token file)
-    if (strlen(G.clientId) < 5 || strlen(G.clientSecret) < 5) {
-        Log::Error("AUTH", "Missing clientId or clientSecret");
-        return false;
+        Log::Info("AUTH", "No CSV and no saved token — will use OAuth browser flow");
     }
 
     // Step 3b: Proactively refresh token to avoid "Invalid access token" errors
