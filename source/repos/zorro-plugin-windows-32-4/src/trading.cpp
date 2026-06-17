@@ -66,6 +66,127 @@ static bool IsPositionClosed(const char* buf) {
 }
 
 // ============================================================
+// CancelTimedOutOrder - NewOrder was accepted by the server but no FILLED
+// arrived in time (typically during the daily market break, when the server
+// queues the order until reopen). Without this, the abandoned order can fill
+// later as an orphan position that Zorro knows nothing about.
+// Cancels the order server-side; if the order fills during cancellation
+// (race), registers the trade and returns zorroId. Returns 0 if cancelled.
+// ============================================================
+
+static int CancelTimedOutOrder(long long orderId, int zorroId, const char* asset,
+                               int tradeSide, long long vol,
+                               double* pPrice, int* pFill) {
+    char payload[256];
+    sprintf_s(payload,
+        "\"ctidTraderAccountId\":%lld,"
+        "\"orderId\":%lld",
+        G.accountId, orderId);
+
+    const char* msgId = Utils::NextMsgId();
+    const char* msg = Protocol::BuildMessage(msgId, PayloadType::CancelOrderReq, payload);
+
+    Log::Info("TRADE", "NewOrder timeout: cancelling accepted order to avoid orphan (zorroId=%d orderId=%lld)",
+              zorroId, orderId);
+
+    {
+        CsLock lock(G.csTrading);
+        ResetTradingBuffer();
+        G.waitingForTrading = true;
+    }
+
+    if (!WebSocket::Send(msg)) {
+        G.waitingForTrading = false;
+        Log::Error("TRADE", "Cancel of timed-out order failed to send: orderId=%lld may fill as ORPHAN — check account!", orderId);
+        return 0;
+    }
+
+    for (int eventCount = 0; eventCount < 5; eventCount++) {
+        if (!WaitForTradingResponse(G.waitTime)) {
+            G.waitingForTrading = false;
+            Log::Error("TRADE", "Cancel of timed-out order: no response, orderId=%lld may fill as ORPHAN — check account!", orderId);
+            return 0;
+        }
+
+        CsLock tlock(G.csTrading);
+        int pt = G.tradingResponsePt;
+
+        if (pt == ToInt(PayloadType::ExecutionEvent)) {
+            int execType = G.tradingResponseExecType;
+            const char* buf = G.tradingResponseBuf;
+
+            if (execType == 5) {  // ORDER_CANCELLED — order is safely dead
+                G.waitingForTrading = false;
+                Log::Info("TRADE", "Timed-out order cancelled OK: zorroId=%d orderId=%lld", zorroId, orderId);
+                return 0;
+            }
+
+            if (execType == 3 || execType == 11) {
+                // Race: the order filled before the cancel reached the server.
+                // Adopt the fill so Zorro gets a valid trade instead of an orphan.
+                G.waitingForTrading = false;
+
+                long long posId = Protocol::ExtractInt64(buf, "positionId");
+                long long ordId = Protocol::ExtractInt64(buf, "orderId");
+                double execPrice = Protocol::ExtractDouble(buf, "executionPrice");
+                long long filledVol = Protocol::ExtractInt64(buf, "filledVolume");
+                if (filledVol <= 0) filledVol = vol;
+
+                double scale = pow(10.0, (double)G.moneyDigits);
+
+                {
+                    CsLock lock(G.csTrades);
+                    TradeInfo ti;
+                    ti.zorroId = zorroId;
+                    ti.positionId = posId;
+                    ti.orderId = (ordId > 0) ? ordId : orderId;
+                    ti.symbol = asset;
+                    ti.volume = filledVol;
+                    ti.tradeSide = tradeSide;
+                    ti.openPrice = execPrice;
+                    ti.commission = (double)Protocol::ExtractInt64(buf, "commission") / scale;
+                    ti.swap = (double)Protocol::ExtractInt64(buf, "swap") / scale;
+                    ti.openTime = Utils::NowMs();
+                    ti.open = true;
+                    G.trades[zorroId] = ti;
+                    G.posIdToZorroId[posId] = zorroId;
+                }
+
+                if (pPrice) *pPrice = execPrice;
+                if (pFill) {
+                    int filled = (int)(filledVol / 100LL);
+                    if (filled == 0) filled = 1;
+                    *pFill = filled;
+                }
+
+                Log::Info("TRADE", "Timed-out order FILLED during cancel: registered zorroId=%d posId=%lld price=%.5f",
+                          zorroId, posId, execPrice);
+                return zorroId;
+            }
+
+            // Other exec types — keep waiting for CANCELLED or FILLED
+            ResetTradingBuffer();
+            continue;
+        }
+
+        if (pt == ToInt(PayloadType::ErrorRes) || pt == ToInt(PayloadType::OrderErrorEvent)) {
+            G.waitingForTrading = false;
+            const char* desc = Protocol::ExtractString(G.tradingResponseBuf, "description");
+            Log::Error("TRADE", "Cancel of timed-out order rejected (%s): orderId=%lld may already be FILLED — check account!",
+                       desc ? desc : "?", orderId);
+            return 0;
+        }
+
+        ResetTradingBuffer();
+        continue;
+    }
+
+    G.waitingForTrading = false;
+    Log::Error("TRADE", "Cancel of timed-out order: too many events, orderId=%lld state unknown — check account!", orderId);
+    return 0;
+}
+
+// ============================================================
 // BuyOrder - open position or place pending order
 // ============================================================
 
@@ -111,6 +232,31 @@ int BuyOrder(const char* asset, int amount, double stopDist, double limit,
     if (refPrice <= 0.0) {
         Log::Error("TRADE", "BuyOrder: no price for %s (ask=%.5f bid=%.5f)", asset, sym.ask, sym.bid);
         return 0;
+    }
+
+    // Margin guard: reject orders that cannot fit into free margin.
+    // 2026-05-04 incident: Z12 requested 4998 units US2000 on a $5.3k account;
+    // the clamped 250-unit chunks kept being re-sent for 33 hours while the
+    // server margin-called the account. Reject loudly here instead.
+    if (G.freeMargin > 0.0) {
+        double units = (double)vol / 100.0;
+        double estMargin = 0.0;
+        if (sym.marginPerLot > 0.01) {
+            // marginPerLot = margin for one Zorro lot (lotAmount units),
+            // lotAmount = minVolume/100 clamped to min 1.0 (see ComputeLotAmount)
+            double lotAmount = (double)sym.minVolume / 100.0;
+            if (lotAmount < 1.0) lotAmount = 1.0;
+            estMargin = (units / lotAmount) * sym.marginPerLot;
+        } else if (G.leverageInCents > 0) {
+            // Fallback: notional / account leverage (most optimistic estimate)
+            estMargin = units * refPrice * Symbols::GetQuoteToDepositRate(sym)
+                        / ((double)G.leverageInCents / 100.0);
+        }
+        if (estMargin > G.freeMargin * 0.90) {
+            Log::Error("TRADE", "BuyOrder REJECTED by margin guard: %s vol=%lld needs ~%.2f margin, free=%.2f (90%% cap) — reduce position size!",
+                       asset, vol, estMargin, G.freeMargin);
+            return 0;
+        }
     }
 
     // Determine order type from G.orderType (set by SET_ORDERTYPE)
@@ -260,14 +406,28 @@ int BuyOrder(const char* asset, int amount, double stopDist, double limit,
     // Wait for response — market orders may get multiple ACCEPTED events
     // before FILLED (order accepted + SL modification etc.)
     // Loop until we get FILLED, ERROR, or timeout.
+    long long acceptedOrderId = 0;  // orderId from ACCEPTED, needed to cancel on timeout
     for (int eventCount = 0; eventCount < 10; eventCount++) {
         bool gotResponse = WaitForTradingResponse(G.waitTime);
 
         if (!gotResponse) {
             G.waitingForTrading = false;
             Log::Error("TRADE", "NewOrder timeout (%dms) after %d events", G.waitTime, eventCount);
-            CsLock lock(G.csTrades);
-            G.pendingActions.erase(msgId);
+            {
+                CsLock lock(G.csTrades);
+                G.pendingActions.erase(msgId);
+            }
+            // The order may sit ACCEPTED on the server and fill after the
+            // market break ends — cancel it (or adopt the fill if it races in).
+            if (acceptedOrderId > 0) {
+                int late = CancelTimedOutOrder(acceptedOrderId, zorroId, asset,
+                                               tradeSide, vol, pPrice, pFill);
+                if (late > 0) {
+                    G.limitPrice = 0.0;
+                    G.orderLabel.clear();
+                    return late;
+                }
+            }
             return 0;
         }
 
@@ -361,9 +521,12 @@ int BuyOrder(const char* asset, int amount, double stopDist, double limit,
             else if (execType == 2) {
                 // ACCEPTED
                 if (cTraderOrderType == 1) {
-                    // Market order: server sends ACCEPTED before FILLED, skip and wait
-                    Log::Diag(1, "TRADE Market order accepted (event %d), waiting for fill... zorroId=%d",
-                              eventCount, zorroId);
+                    // Market order: server sends ACCEPTED before FILLED, skip and wait.
+                    // Remember orderId so the order can be cancelled on timeout.
+                    long long oid = Protocol::ExtractInt64(buf, "orderId");
+                    if (oid > 0) acceptedOrderId = oid;
+                    Log::Diag(1, "TRADE Market order accepted (event %d), waiting for fill... zorroId=%d orderId=%lld",
+                              eventCount, zorroId, oid);
                     ResetTradingBuffer();
                     // waitingForTrading stays true — NetworkThread keeps forwarding
                     continue;

@@ -751,7 +751,7 @@ DLLFUNC int BrokerAsset(char* Asset, double* pPrice, double* pSpread,
             if (G.marginResponseReady) {
                 // Re-read sym to get updated marginPerLot
                 Symbols::GetSymbol(Asset, sym);
-                Log::Diag(1, "ASSET M7 margin loaded for %s: marginPerLot=%.4f (vol=%lld)", Asset, sym.marginPerLot, marginVolume);
+                Log::Info("ASSET", "M7 margin loaded for %s: marginPerLot=%.4f (vol=%lld)", Asset, sym.marginPerLot, marginVolume);
             } else {
                 Log::Warn("ASSET", "M7 ExpectedMarginReq timeout for %s (3s)", Asset);
             }
@@ -816,13 +816,24 @@ DLLFUNC int BrokerAsset(char* Asset, double* pPrice, double* pSpread,
 
     G.currentSymbol = Asset;
 
-    Log::Diag(2, "ASSET %s: bid=%.5f ask=%.5f LotAmt=%.1f PipCost=%.6f MCost=%.4f Roll=%.4f/%.4f Comm=%.4f",
-              Asset, sym.bid, sym.ask,
-              pLotAmount ? *pLotAmount : -1.0,
-              pPipCost ? *pPipCost : -1.0,
-              pMarginCost ? *pMarginCost : 0.0,
-              pRollLong ? *pRollLong : 0.0, pRollShort ? *pRollShort : 0.0,
-              pVolume ? *pVolume : 0.0);
+    if (pMarginCost) {
+        // Asset setup call (params requested): log at INFO so the margin
+        // basis of position sizing is always visible in the log
+        Log::Info("ASSET", "%s: bid=%.5f ask=%.5f LotAmt=%.1f PipCost=%.6f MCost=%.4f Roll=%.4f/%.4f Comm=%.4f",
+                  Asset, sym.bid, sym.ask,
+                  pLotAmount ? *pLotAmount : -1.0,
+                  pPipCost ? *pPipCost : -1.0,
+                  *pMarginCost,
+                  pRollLong ? *pRollLong : 0.0, pRollShort ? *pRollShort : 0.0,
+                  pVolume ? *pVolume : 0.0);
+    } else {
+        Log::Diag(2, "ASSET %s: bid=%.5f ask=%.5f LotAmt=%.1f PipCost=%.6f Roll=%.4f/%.4f Comm=%.4f",
+                  Asset, sym.bid, sym.ask,
+                  pLotAmount ? *pLotAmount : -1.0,
+                  pPipCost ? *pPipCost : -1.0,
+                  pRollLong ? *pRollLong : 0.0, pRollShort ? *pRollShort : 0.0,
+                  pVolume ? *pVolume : 0.0);
+    }
 
     return 1;
 }

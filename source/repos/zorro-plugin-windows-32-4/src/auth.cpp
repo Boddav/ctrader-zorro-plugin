@@ -603,7 +603,7 @@ bool OAuthBrowserFlow() {
     return false;
 }
 
-bool RefreshAccessToken() {
+static bool DoRefreshAccessToken() {
     if (strlen(G.refreshToken) < 10) return false;
 
     Log::Info("AUTH", "Refreshing access token...");
@@ -684,6 +684,43 @@ bool RefreshAccessToken() {
     Log::Error("AUTH", "Token refresh failed. Response: %.200s", tokenBuf);
     strcpy_s(G.accessToken, oldToken);
     return false;
+}
+
+// Multiple Zorro instances share the same Plugin dir and oauth_token.json,
+// and cTrader refresh tokens are SINGLE-USE: when one instance rotates the
+// token, the copy held in every other instance's memory becomes invalid
+// (ACCESS_DENIED — this caused the 2026-05-22 auth death spiral).
+// Serialize refreshes across processes with a named mutex and re-read the
+// token file before/after, adopting a token already rotated by a sibling.
+bool RefreshAccessToken() {
+    if (strlen(G.refreshToken) < 10) return false;
+
+    HANDLE hMutex = CreateMutexA(NULL, FALSE, "Local\\cTrader_plugin_token_refresh");
+    if (hMutex) WaitForSingleObject(hMutex, 30000);
+
+    char myRefresh[2048];
+    strcpy_s(myRefresh, G.refreshToken);
+
+    bool ok;
+    if (LoadToken() && strcmp(G.refreshToken, myRefresh) != 0) {
+        // Another instance already rotated the token while we held the old one
+        Log::Info("AUTH", "Token already rotated by another instance, using token from disk");
+        ok = true;
+    } else {
+        ok = DoRefreshAccessToken();
+
+        if (!ok) {
+            // Our refresh token may have been consumed by a sibling instance
+            // just before we read the file above — re-read once more.
+            if (LoadToken() && strcmp(G.refreshToken, myRefresh) != 0) {
+                Log::Info("AUTH", "Refresh failed but disk has newer token (rotated by another instance), using it");
+                ok = true;
+            }
+        }
+    }
+
+    if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); }
+    return ok;
 }
 
 bool Login(const char* user, const char* pwd, const char* type) {
