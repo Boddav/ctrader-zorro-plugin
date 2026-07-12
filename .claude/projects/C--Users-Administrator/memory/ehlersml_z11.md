@@ -27,6 +27,8 @@ metadata:
 - Session ablakok (WFO átlag): JPY TRND 5→18 UTC, JPY CYCL 5→15 UTC — Tokió-vég/London/NY, gazdaságilag értelmes; paraméterek a tartomány közepén (nincs határérték-tapadás)
 - MRC mód a portfólió szkriptbe építve: `Data\pfmrc.txt` (ciklusszám) megléte kapcsolja; eredmények Log\pfmrc_results.csv
 - Élesítéshez: RiskDayLoss=4, RiskMaxDD=10 (FTMO), min. tőke ~1500$ vagy cent-számla (H4 stop 400-600 pip × 0.01 lot ≈ 26-40$ kockázat/trade)
+- **ML réteg kísérlet (LEZÁRVA 2026-07-12)**: perceptron GO/SKIP a session-szűrt portfólión NEM éri meg — win% 58→62% és átlagtrade +53%, DE profit −36%, Sharpe 1.62→1.17, R2 0.77→0.58. A session-szűrő már elvitte a regime-edge-et, a perceptron redundáns. `EhlersPortfolioML.c` (fix paraméteres + advise, mlcfg.txt = threshold)
+- **BÓNUSZ: a FIX átlagparaméteres verzió (ML off) veri a WFO-sat**: PF 1.63, Sharpe 1.62, DD 11.6%, R2 0.767 vs WFO Sharpe 1.39/DD 13.4/R2 0.615 → ÉLESRE A FIX PARAMÉTERES AJÁNLOTT (EhlersPortfolioML.c, MLThreshold=-100). Rules-only train figyelés: a train.log ÜRES marad — a Data\*_ml.c fájlok megjelenését kell nézni!
 - EhlersCheck.c (standalone WFO check, config Data\checkcfg.txt-ből) + EhlersMRC.c (Detrend=SHUFFLE Montecarlo) — headless batch minta a scratchpad runcheck3.ps1/runmrc.ps1-ben; Zorro CLI: -run/-train (NEM -test!), -quiet; a -d NEM #define, csak Define string!
 - **Jobok**: `Job\EhlersML_ML.csv` (szűrő be) és `Job\EhlersML_NoML.csv` (baseline) — formátum: 1. sor a szkript neve, majd `név,érték,min,max,step`; step≠0 = optimalizált; a betöltés NÉV szerint történik, csak a szkript-változókat tölti (Type&8)
 - **History átmásolva** z7 3.0-ból: GBPUSD 2017–2025, USDJPY 2019–2025, XAUUSD 2019–2025 (2025 mind hiányos → ezért EndDate 2024)
