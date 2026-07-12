@@ -28,10 +28,39 @@ metadata:
 - MRC mód a portfólió szkriptbe építve: `Data\pfmrc.txt` (ciklusszám) megléte kapcsolja; eredmények Log\pfmrc_results.csv
 - Élesítéshez: RiskDayLoss=4, RiskMaxDD=10 (FTMO), min. tőke ~1500$ vagy cent-számla (H4 stop 400-600 pip × 0.01 lot ≈ 26-40$ kockázat/trade)
 - **ML réteg kísérlet (LEZÁRVA 2026-07-12)**: perceptron GO/SKIP a session-szűrt portfólión NEM éri meg — win% 58→62% és átlagtrade +53%, DE profit −36%, Sharpe 1.62→1.17, R2 0.77→0.58. A session-szűrő már elvitte a regime-edge-et, a perceptron redundáns. `EhlersPortfolioML.c` (fix paraméteres + advise, mlcfg.txt = threshold)
+- **DEMO ÉLESÍTÉS (2026-07-12)**: cTrader demo 3000$ 1:1000. `EhlersPortfolioFix.c` = éles verzió: setRiskLots() kockázat-alapú méretezés (RiskPct=3% → 2-4 microlot; áttétel-független!), set(PRELOAD) a lookback-hez, riskGuard élesítve (4%/10%, a MaxDD halt PERMANENS — kézi újraindítás kell)
+- **Élesítési csapdák (mind megjárva)**: (1) Margin-alapú sizing 1:1000-en = 0.9 lot = robbantás → Lots-alapú kell; (2) `Margin = 0` némán KILÖVI a trade-eket → 0.000001 kell (eval.c minta); (3) riskGuard Equity tesztben 0-ról indul → `abs(Capital)+ProfitTotal` tesztben, `Equity` élesben; (4) lite-C: int literál var paraméternek → mindig `5.` formában; (5) 3000$-nál RiskPct 1.5% = 0 trade (1 microlot ≈ 2-2.6%), 3% kell
 - **BÓNUSZ: a FIX átlagparaméteres verzió (ML off) veri a WFO-sat**: PF 1.63, Sharpe 1.62, DD 11.6%, R2 0.767 vs WFO Sharpe 1.39/DD 13.4/R2 0.615 → ÉLESRE A FIX PARAMÉTERES AJÁNLOTT (EhlersPortfolioML.c, MLThreshold=-100). Rules-only train figyelés: a train.log ÜRES marad — a Data\*_ml.c fájlok megjelenését kell nézni!
 - EhlersCheck.c (standalone WFO check, config Data\checkcfg.txt-ből) + EhlersMRC.c (Detrend=SHUFFLE Montecarlo) — headless batch minta a scratchpad runcheck3.ps1/runmrc.ps1-ben; Zorro CLI: -run/-train (NEM -test!), -quiet; a -d NEM #define, csak Define string!
 - **Jobok**: `Job\EhlersML_ML.csv` (szűrő be) és `Job\EhlersML_NoML.csv` (baseline) — formátum: 1. sor a szkript neve, majd `név,érték,min,max,step`; step≠0 = optimalizált; a betöltés NÉV szerint történik, csak a szkript-változókat tölti (Type&8)
 - **History átmásolva** z7 3.0-ból: GBPUSD 2017–2025, USDJPY 2019–2025, XAUUSD 2019–2025 (2025 mind hiányos → ezért EndDate 2024)
+
+## B-rosta: indexek/ezüst/CHF (2026-07-12, LEZÁRVA)
+- US30/NAS100/SPX500/GER30/XAG/EURCHF letesztelve (history z3-ból átmásolva z11-be)
+- **Indexek+ezüst: ELUTASÍTVA** — TRND profitos, de R2~0, óriási DD-k; az Ehlers H4 rendszer deviza-specialista
+- **EUR/CHF CYCL H4: ELUTASÍTVA robusztusság-teszten** — a rostában PF 1.51/R2 0.83 volt (csali!), de a 6 WFO-konfigból 4-ben NULLA trade (a session-paraméterek degenerált ablakokba optimalizálódtak = paraméter-instabilitás), a maradó 2-ben PF 1.08-1.24. Tanulság: az egy-felosztásos rosta-eredmény önmagában SOSEM elég
+- Jen-keresztek (EUR/JPY, GBP/JPY): DownloadJPY.c szkript kész (assetHistory mode 4, 6 év H1), AssetsFix sorok felvéve — a user futtatja élő kapcsolattal
+
+## Round 2 EREDMÉNY (2026-07-13, kiértékelve)
+- **H2 (120M) = a kör felfedezése** (user Z1+ ötlete!): USD/JPY TRND H2 PF 2.20/72tr/R2 0.27; USD/CAD TRND H2 PF 1.56 (H1/H4-en halott volt!); GBP/USD TRN2 H2 PF 1.32/R2 0.49 (feltámadt!)
+- **Kilépési logikák**: H4-en eredeti TRND nyer (trendnek tér kell, trailing árt: 3.74 vs 1.85); H2-n és nehéz párokon TRN2 (trailing) a befutó; CYC2 (középvonal-exit) simít (EURCHF R2 0.13→0.58) de PF-ben nem ugrik
+- **Mag megerősítve 3. beállításban is**: USD/JPY TRND H4 minimál-opt, session nélkül PF 3.74/R2 0.78
+- EUR/JPY TRN2 H4: PF 1.52/40tr/R2 0.48 — elfogadható jen-kereszt forma
+- **4 jelölt 6-konfigos validáción (EhlersCheckX.c — generikus, Data\checkx.txt: "cycles,split,asset,algo,tf")**: USDJPY TRND H2, USDCAD TRND H2, GBPUSD TRN2 H2, EURJPY TRN2 H4 → utána MRC + 2025-26 forward → portfólió-bővítés
+- cTrader MCP: LOCAL szerver ÉL (cTrader 5.7.14 desktop telepítve, port 9876, HTTP 200 initialize OK) — új sessionben aktív!
+
+## Round 2 nagy rosta (2026-07-12 este, FOLYAMATBAN)
+- **User kérésére**: mind a 9 pár vissza + kitöltött stepek + 2 ÚJ KILÉPÉSI LOGIKA
+- `_ASSETS`: EUR/USD, GBP/USD, USD/JPY, USD/CHF, AUD/USD, USD/CAD, EUR/CHF, EUR/JPY, GBP/JPY × `_ALGOS`: TRND, CYCL, **TRN2** (trailing trend-exit), **CYC2** (középvonal/0.5 exit a CYCL-hez) × TF 60/**120**/240 = 108 variáns
+- Job: `EhlersML_Round2.csv` — stepek: TRND_Period -20 (geometrikus!), CTIThresh 0.1, CYCL_Period 5, Edge 0.05, TrailDist 2, StopDist 2; session KI
+- Korábbi summary: `Job\Pending\EhlersML_Summary_round1.csv`
+- EUR/JPY CYCL session-es 6-konfig check (EhlersCheck3) háttérben futott — eredménye kiértékelendő
+- Kiértékelés után: legjobbak → 6-konfig robusztusság → MRC → 2025-26 forward (jen-kereszteknél van érintetlen adat!) → portfólió-frissítés
+
+## cTrader MCP (2026-07-12)
+- `ctrader` MCP szerver regisztrálva Claude Code user configban: HTTP http://127.0.0.1:9876/mcp/ (cTrader desktop Settings → MCP Server → Enable kell hozzá)
+- **CSAK MEGFIGYELÉSRE** (számla/pozíciók/árak) — "Allow trading via MCP" szándékosan KI; kereskedés kizárólag Zorro+riskGuard vonalon
+- Használat: demó-felügyelet (EhlersPortfolioFix pozíciók vs backtest), kitöltés-ellenőrzés, gyertya-adatok
 
 ## Shell tudnivalók (eval.c v1.10)
 - Panel változók a .c fájl elejéről parsolódnak: `var NAME;<tab>//= default, min..max, step; leírás` — a parser az első `sizeof(V)` db sor-eleji `var `-t olvassa, EZUTÁN jöhet csak más sor-eleji `var` (pl. függvény)!

@@ -238,9 +238,9 @@ int BuyOrder(const char* asset, int amount, double stopDist, double limit,
     // 2026-05-04 incident: Z12 requested 4998 units US2000 on a $5.3k account;
     // the clamped 250-unit chunks kept being re-sent for 33 hours while the
     // server margin-called the account. Reject loudly here instead.
-    if (G.freeMargin > 0.0) {
+    double estMargin = 0.0;
+    {
         double units = (double)vol / 100.0;
-        double estMargin = 0.0;
         if (sym.marginPerLot > 0.01) {
             // marginPerLot = margin for one Zorro lot (lotAmount units),
             // lotAmount = minVolume/100 clamped to min 1.0 (see ComputeLotAmount)
@@ -252,9 +252,38 @@ int BuyOrder(const char* asset, int amount, double stopDist, double limit,
             estMargin = units * refPrice * Symbols::GetQuoteToDepositRate(sym)
                         / ((double)G.leverageInCents / 100.0);
         }
-        if (estMargin > G.freeMargin * 0.90) {
-            Log::Error("TRADE", "BuyOrder REJECTED by margin guard: %s vol=%lld needs ~%.2f margin, free=%.2f (90%% cap) — reduce position size!",
-                       asset, vol, estMargin, G.freeMargin);
+    }
+
+    if (G.freeMargin > 0.0 && estMargin > G.freeMargin * 0.90) {
+        Log::Error("TRADE", "BuyOrder REJECTED by margin guard: %s vol=%lld needs ~%.2f margin, free=%.2f (90%% cap) — reduce position size!",
+                   asset, vol, estMargin, G.freeMargin);
+        return 0;
+    }
+
+    // Per-instance margin budget (MaxMarginPct in Plugin\cTrader.ini):
+    // the account-wide guard above cannot stop several strategies sharing one
+    // account from jointly filling it up — each one alone still "fits".
+    // This caps the total margin THIS instance may hold at pct% of equity.
+    if (G.maxMarginPct > 0.0 && G.equity > 0.0) {
+        double myUsed = 0.0;
+        {
+            CsLock lock(G.csTrades);
+            for (auto& kv : G.trades) {
+                const TradeInfo& t = kv.second;
+                if (!t.open || t.positionId <= 0) continue;
+                if (t.usedMargin > 0.0) {
+                    myUsed += t.usedMargin;
+                } else if (G.leverageInCents > 0) {
+                    // No server-reported margin — estimate from notional
+                    myUsed += ((double)t.volume / 100.0) * t.openPrice
+                              / ((double)G.leverageInCents / 100.0);
+                }
+            }
+        }
+        double budget = G.equity * G.maxMarginPct / 100.0;
+        if (myUsed + estMargin > budget) {
+            Log::Error("TRADE", "BuyOrder REJECTED by instance margin budget: %s used=%.2f + new ~%.2f > budget %.2f (%.0f%% of equity %.2f)",
+                       asset, myUsed, estMargin, budget, G.maxMarginPct, G.equity);
             return 0;
         }
     }
@@ -295,9 +324,17 @@ int BuyOrder(const char* asset, int amount, double stopDist, double limit,
 
     // Build NewOrderReq payload
     // Label: always starts with "z_{zorroId}" for position persistence after restart.
-    // SET_ORDERTEXT value is appended after the z_N prefix.
+    // When a per-instance tag is known, insert it with a "__" delimiter
+    // ("z_{id}__{tag}") so reconcile can tell this instance's positions apart
+    // from a sibling instance sharing the same cTrader account.
+    // SET_ORDERTEXT value (orderLabel) is appended last.
     char labelBuf[128];
-    if (!G.orderLabel.empty()) {
+    const std::string& tag = G.instanceTag;
+    if (!tag.empty() && !G.orderLabel.empty()) {
+        sprintf_s(labelBuf, "z_%d__%s_%s", zorroId, tag.c_str(), G.orderLabel.c_str());
+    } else if (!tag.empty()) {
+        sprintf_s(labelBuf, "z_%d__%s", zorroId, tag.c_str());
+    } else if (!G.orderLabel.empty()) {
         sprintf_s(labelBuf, "z_%d_%s", zorroId, G.orderLabel.c_str());
     } else {
         sprintf_s(labelBuf, "z_%d", zorroId);
@@ -1355,6 +1392,29 @@ bool RequestReconcile() {
     return false;
 }
 
+// Extract the per-instance tag from a position/order label.
+// Format "z_{id}__{tag}" or "z_{id}__{tag}_{orderText}". The "__" marker
+// uniquely identifies the tag; legacy labels ("z_{id}" / "z_{id}_{text}")
+// have no "__" and return empty (= unknown owner, adopt for back-compat).
+static std::string ExtractLabelTag(const char* label) {
+    if (!label) return "";
+    const char* dd = strstr(label, "__");
+    if (!dd) return "";
+    const char* p = dd + 2;
+    const char* e = p;
+    while (*e && *e != '_') e++;
+    return std::string(p, (size_t)(e - p));
+}
+
+// True when a reconciled label belongs to a DIFFERENT instance sharing this
+// account (its tag is set and differs from ours). Such positions must not be
+// adopted, or this instance could close a sibling strategy's trade.
+static bool LabelBelongsToOtherInstance(const char* label) {
+    if (G.instanceTag.empty()) return false;          // we don't tag -> adopt all (legacy)
+    std::string t = ExtractLabelTag(label);
+    return !t.empty() && t != G.instanceTag;
+}
+
 void HandleReconcileRes(const char* buffer) {
     // Parse position array from reconcile response
     const char* arr = Protocol::ExtractArray(buffer, "position");
@@ -1387,6 +1447,14 @@ void HandleReconcileRes(const char* buffer) {
         // This allows Zorro to find the same trade after plugin restart
         int zid = 0;
         const char* label = Protocol::ExtractString(elem, "label");
+
+        // Shared-account safety: skip positions tagged by another instance
+        if (LabelBelongsToOtherInstance(label)) {
+            Log::Diag(1, "TRADE Reconcile: skip posId=%lld (label '%s' owned by another instance, mine='%s')",
+                      posId, label ? label : "", G.instanceTag.c_str());
+            continue;
+        }
+
         if (label && label[0] == 'z' && label[1] == '_') {
             zid = atoi(label + 2);
         }
@@ -1469,6 +1537,14 @@ void HandleReconcileRes(const char* buffer) {
             // Recover zorroId from label "z_N"
             int zid = 0;
             const char* ordLabel = Protocol::ExtractString(elem, "label");
+
+            // Shared-account safety: skip pending orders owned by another instance
+            if (LabelBelongsToOtherInstance(ordLabel)) {
+                Log::Diag(1, "TRADE Reconcile: skip orderId=%lld (label '%s' owned by another instance, mine='%s')",
+                          ordId, ordLabel ? ordLabel : "", G.instanceTag.c_str());
+                continue;
+            }
+
             if (ordLabel && ordLabel[0] == 'z' && ordLabel[1] == '_') {
                 zid = atoi(ordLabel + 2);
             }

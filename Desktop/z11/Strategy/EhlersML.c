@@ -24,9 +24,9 @@ var RiskDayLoss;	//= 0, 0..10; Daily loss halt in % of equity, 0 = off
 var RiskMaxDD;		//= 0, 0..50; Equity drawdown halt in % from peak, 0 = off
 END_OF_VARS
 
-#define _ASSETS	"EUR/USD","USD/JPY","USD/CHF","AUD/USD","USD/CAD"
-#define _ALGOS	"TRND","CYCL"
-#define _TIMEFRAMES	60,240
+#define _ASSETS	"EUR/USD","GBP/USD","USD/JPY","USD/CHF","AUD/USD","USD/CAD","EUR/CHF","EUR/JPY","GBP/JPY"
+#define _ALGOS	"TRND","CYCL","TRN2","CYC2"
+#define _TIMEFRAMES	60,120,240
 
 // normalized regime features for the perceptron filter
 var FeedMMI,FeedCTI,FeedFisher,FeedDC,FeedVol,FeedTrend;
@@ -136,6 +136,55 @@ void tradeCycle()
 	}
 }
 
+void tradeTrend2()	// TRND entries + trailing exit instead of reverse-only
+{
+	vars Prices = series(price(0));
+	vars Trends = series(Decycle(Prices,_optimize(V.TRND_Period)));
+	vars CTIs = series(CTI(Prices,V.TRND_CTIPeriod));
+	var Threshold = _optimize(V.TRND_CTIThresh);
+
+	Stop = _optimize(V.StopDist) * ATR(V.ATRPeriod);
+	Trail = V.CYCL_TrailDist * ATR(V.ATRPeriod);	// protect trend profits
+
+	var Go = 100;
+	if(EntryOK && CTIs[0] > Threshold && valley(Trends)) {
+		if(V.MLMode > 0) Go = mlGoLong();
+		if(Train || Go > V.MLThreshold)
+			enterLong();
+	} else if(EntryOK && CTIs[0] < -Threshold && peak(Trends)) {
+		if(V.MLMode > 0) Go = mlGoShort();
+		if(Train || Go > V.MLThreshold)
+			enterShort();
+	}
+}
+
+void tradeCycle2()	// CYCL entries + exit at the midline (target the mean)
+{
+	vars Prices = series(price(0));
+	vars Stochs = series(StochEhlers(Prices,
+		_optimize(V.CYCL_Period),V.CYCL_CutLow,V.CYCL_CutHigh));
+	var Edge = _optimize(V.CYCL_Edge);
+
+	Stop = _optimize(V.StopDist) * ATR(V.ATRPeriod);
+	Trail = 0;
+
+	if(crossOver(Stochs,0.5))	// swing reached the mean - take profit
+		exitLong();
+	if(crossUnder(Stochs,0.5))
+		exitShort();
+
+	var Go = 100;
+	if(EntryOK && crossUnder(Stochs,Edge)) {
+		if(V.MLMode > 0) Go = mlGoLong();
+		if(Train || Go > V.MLThreshold)
+			enterLong();
+	} else if(EntryOK && crossOver(Stochs,1.-Edge)) {
+		if(V.MLMode > 0) Go = mlGoShort();
+		if(Train || Go > V.MLThreshold)
+			enterShort();
+	}
+}
+
 function run()
 {
 	set(PARAMETERS,FACTORS);	// optimized parameters and OptimalF factors
@@ -171,6 +220,10 @@ function run()
 		tradeTrend();
 	else if(strstr(Algo,"CYCL"))
 		tradeCycle();
+	else if(strstr(Algo,"TRN2"))
+		tradeTrend2();
+	else if(strstr(Algo,"CYC2"))
+		tradeCycle2();
 	return 0;
 }
 

@@ -118,6 +118,12 @@ struct State {
     std::string hostOverride;
     std::string redirectUri;       // from CSV, e.g. "http://127.0.0.1:53123/callback"
 
+    // Per-instance tag (e.g. "Z1", "Z12") derived from the Zorro window title.
+    // Multiple Zorro instances can share one cTrader account; this tag makes
+    // position labels unique per strategy ("z_{id}__{tag}") so reconcile does
+    // not adopt another instance's positions. Empty = unknown (legacy behavior).
+    std::string instanceTag;
+
     // Login state
     bool loggedIn = false;
     bool loginCompleted = false;
@@ -154,6 +160,12 @@ struct State {
     double equity = 0.0;
     double margin = 0.0;
     double freeMargin = 0.0;
+
+    // Per-instance margin budget (% of equity), from Plugin\cTrader.ini
+    // "MaxMarginPct = 40". Caps the total margin THIS instance may use, so
+    // several strategies sharing one account cannot jointly overcommit it.
+    // 0 = disabled (only the account-wide free margin guard applies).
+    double maxMarginPct = 0.0;
     int moneyDigits = 2;
     long long leverageInCents = 0;  // from TraderRes: 50000 = 500:1
     long long depositAssetId = 0;   // from TraderRes: account deposit currency asset ID
@@ -250,7 +262,7 @@ extern State G;
 // Constants
 constexpr int PLUGIN_TYPE = 2;
 constexpr const char* PLUGIN_NAME = "cTrader";
-constexpr const char* PLUGIN_VERSION = "4.10.0";
+constexpr const char* PLUGIN_VERSION = "4.12.0";
 constexpr const char* CTRADER_HOST_DEMO = "demo.ctraderapi.com";
 constexpr const char* CTRADER_HOST_LIVE = "live.ctraderapi.com";
 constexpr int CTRADER_WS_PORT = 5036;

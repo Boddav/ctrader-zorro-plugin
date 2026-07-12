@@ -70,7 +70,7 @@ function run()
 {
 	set(LOGFILE|PLOTNOW);
 
-	BarPeriod = 60;
+	BarPeriod = 15;
 	LookBack = 900;
 	StartDate = 20200101;
 	EndDate = 20261018;

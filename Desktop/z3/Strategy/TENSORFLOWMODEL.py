@@ -265,7 +265,10 @@ def serve(port=5001):
             prob = model.predict_proba(X_s)[0]
             win_prob = float(prob[1]) if len(prob) > 1 else 0.5
 
-            threshold = 0.40 if entry_type == 'CH' else 0.45
+            base_th = 0.40 if entry_type == 'CH' else 0.45
+            # Adaptive threshold from phantom feedback
+            th_key = f'threshold_{entry_type}'
+            threshold = state.get(th_key, base_th)
             action = "GO" if win_prob >= threshold else "SKIP"
 
             return jsonify({
@@ -275,6 +278,77 @@ def serve(port=5001):
             })
         except Exception as e:
             return jsonify({"action": "GO", "confidence": 0.5, "error": str(e)})
+
+    @app.route('/algo_vote', methods=['POST'])
+    def api_algo_vote():
+        """Market features → algo_mode: 1=Both, 2=SMA, 3=CH"""
+        try:
+            data = request.get_json(force=True)
+            features = data.get('features', [])
+
+            if len(features) < 12:
+                return jsonify({"algo_mode": 1})
+
+            # Features: ATR_Pct, Range_Pct, Volatility, ADX, Trend_Bias,
+            #           Trend_Quality, RSI, Hurst, Return_20, BB_Width,
+            #           WinRate, Current_State
+            adx = features[3]
+            trend_bias = features[4]
+            hurst = features[7]
+
+            # Trending market → SMA, ranging → CH, mixed → Both
+            # Hurst > 0.55 = trending, < 0.45 = mean-reverting
+            # ADX > 25 = trending, < 20 = ranging
+            if hurst > 0.55 and adx > 25:
+                mode = 2  # SMA — trending
+            elif hurst < 0.45 and adx < 20:
+                mode = 3  # CH — mean-reverting
+            else:
+                mode = 1  # Both
+
+            return jsonify({"algo_mode": mode})
+        except Exception as e:
+            return jsonify({"algo_mode": 1, "error": str(e)})
+
+    @app.route('/phantom_feedback', methods=['POST'])
+    def api_phantom_feedback():
+        """Phantom trade feedback → adaptive filter threshold"""
+        try:
+            data = request.get_json(force=True)
+            entry_type = data.get('entry_type', 'SMA')  # SMA or CH
+            wins = data.get('wins', 0)
+            losses = data.get('losses', 0)
+            pnl = data.get('pnl', 0)
+            total = wins + losses
+            if total < 5:
+                return jsonify({"action": "wait", "reason": "not enough data"})
+
+            phantom_wr = wins / total
+            base_th = 0.40 if entry_type == 'CH' else 0.45
+            th_key = f'threshold_{entry_type}'
+            old_th = state.get(th_key, base_th)
+
+            # Ha phantom WR magas → filter túl agresszív → lazítsuk
+            # Ha phantom WR alacsony → filter jól szűr → tartsuk/szigorítsuk
+            if phantom_wr > 0.55:
+                new_th = max(0.30, old_th - 0.02)  # lazítás
+            elif phantom_wr < 0.40:
+                new_th = min(0.60, old_th + 0.02)  # szigorítás
+            else:
+                new_th = old_th  # tartás
+
+            state[th_key] = new_th
+            print(f"[PHANTOM] {entry_type}: W={wins} L={losses} WR={phantom_wr:.0%} PnL=${pnl:.1f} | threshold {old_th:.2f} → {new_th:.2f}")
+
+            return jsonify({
+                "entry_type": entry_type,
+                "phantom_wr": round(phantom_wr, 4),
+                "old_threshold": round(old_th, 4),
+                "new_threshold": round(new_th, 4),
+                "pnl": round(pnl, 2)
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
     @app.route('/retrain', methods=['POST'])
     def api_retrain():
@@ -286,22 +360,75 @@ def serve(port=5001):
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
+    # =================================================================
+    # EXIT CHECK — Phase 1: rule-based Profit Giveback Guard
+    # Phase 2: replace with ML model trained on CH_ExitData.csv
+    # =================================================================
+    EXIT_CSV_PATH = Path(__file__).parent / "CH_ExitData.csv"
+
+    @app.route('/exit_check', methods=['POST'])
+    def api_exit_check():
+        try:
+            data = request.get_json(force=True)
+            pnl_atr = data.get('pnl_atr', 0)
+            dist_reg_atr = data.get('dist_reg_atr', 0)
+            momentum_3bar = data.get('momentum_3bar', 0)
+            bars_held = data.get('bars_held', 0)
+            rsi = data.get('rsi', 50)
+            adx = data.get('adx', 25)
+
+            action = "HOLD"
+            reason = ""
+
+            # Rule 1: RegLine TP — elérte a targetet
+            if dist_reg_atr <= 0.05:
+                action = "EXIT"
+                reason = "regline_tp"
+
+            # Rule 2: Profit Giveback Guard — volt profit, momentum megfordult
+            elif pnl_atr > 0.3 and momentum_3bar < -0.1:
+                action = "EXIT"
+                reason = "giveback"
+
+            # Rule 3: Stale trade — sok bar, nincs érdemi profit
+            elif bars_held > 30 and abs(pnl_atr) < 0.15:
+                action = "EXIT"
+                reason = "stale"
+
+            # Rule 4: Erős trend ellened — ADX magas, rossz irány
+            elif adx > 35 and pnl_atr < -0.2:
+                action = "EXIT"
+                reason = "adverse_trend"
+
+            return jsonify({
+                "action": action,
+                "reason": reason,
+                "pnl_atr": round(pnl_atr, 4),
+                "mode": "rules_v1"
+            })
+        except Exception as e:
+            return jsonify({"action": "HOLD", "reason": "error", "error": str(e)})
+
     @app.route('/health', methods=['GET'])
     def health():
         return jsonify({
             "status": "ok",
-            "version": "v6",
+            "version": "v6.1",
             "param_model": state['param_model'] is not None,
             "param_targets": TARGET_COLS,
-            "filter_models": list(state['filter_models'].keys())
+            "filter_models": list(state['filter_models'].keys()),
+            "exit_check": "rules_v1",
+            "threshold_SMA": state.get('threshold_SMA', 0.45),
+            "threshold_CH": state.get('threshold_CH', 0.40)
         })
 
-    print(f"\n=== META-LEARNING SERVER v6 on port {port} ===")
+    print(f"\n=== META-LEARNING SERVER v6.1 on port {port} ===")
     print(f"Params: {len(TARGET_COLS)} ({', '.join(TARGET_COLS)})")
-    print(f"POST /predict  -> {len(TARGET_COLS)} optimal params")
-    print(f"POST /filter   -> GO/SKIP + confidence")
-    print(f"POST /retrain  -> retrain both models")
-    print(f"GET  /health   -> status\n")
+    print(f"POST /predict     -> {len(TARGET_COLS)} optimal params")
+    print(f"POST /filter      -> GO/SKIP + confidence")
+    print(f"POST /exit_check  -> HOLD/EXIT (rules v1, later ML)")
+    print(f"POST /retrain     -> retrain both models")
+    print(f"GET  /health      -> status\n")
     app.run(host='127.0.0.1', port=port, debug=False)
 
 

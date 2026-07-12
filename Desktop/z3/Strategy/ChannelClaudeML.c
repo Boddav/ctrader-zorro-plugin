@@ -19,12 +19,12 @@ function run()
 	{
 		if(trainStep == 1)
 		{
-			set(LOGFILE|PLOTNOW|RULES);
+			set(LOGFILE|PLOTNOW|RULES|FACTORS);
 			if(Bar == 0) printf("\n=== STEP 1: PERCEPTRON TRAINING ===\n");
 		}
 		else
 		{
-			set(LOGFILE|PLOTNOW|PARAMETERS);
+			set(LOGFILE|PLOTNOW|PARAMETERS|FACTORS);
 			if(Bar == 0) printf("\n=== STEP 2: PARAMETER OPTIMIZATION ===\n");
 		}
 	}
@@ -36,7 +36,7 @@ function run()
 	StartDate = 20250101;
 	EndDate = 20260301;
 
-	Capital = 2000;
+	Capital = 1000;
 	Leverage = 500;
 	Hedge = 2;
 	EndWeek = 52200;
@@ -46,7 +46,7 @@ function run()
 	NumWFOCycles = -6;
 
 	if(Train) Hedge = 2;
-	if(!Train) MaxLong = MaxShort = 1;
+	if(!Train) MaxLong = MaxShort = 3;
 
 	if(Bar == 0 && is(TRADEMODE))
 		brokerTrades(0);

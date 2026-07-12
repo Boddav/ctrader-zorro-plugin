@@ -723,6 +723,85 @@ bool RefreshAccessToken() {
     return ok;
 }
 
+// EnumWindows callback: find this process's Zorro main window title.
+#pragma comment(lib, "user32.lib")
+struct EnumWinCtx { DWORD pid; char title[256]; bool found; };
+static BOOL CALLBACK FindZorroWindowProc(HWND hwnd, LPARAM lp) {
+    EnumWinCtx* c = reinterpret_cast<EnumWinCtx*>(lp);
+    DWORD wpid = 0;
+    GetWindowThreadProcessId(hwnd, &wpid);
+    if (wpid == c->pid) {
+        char buf[256] = {};
+        if (GetWindowTextA(hwnd, buf, (int)sizeof(buf)) > 0 && strstr(buf, "Zorro")) {
+            strcpy_s(c->title, buf);
+            c->found = true;
+            return FALSE;  // stop enumeration
+        }
+    }
+    return TRUE;
+}
+
+// Derive a short per-instance tag from the Zorro window title
+// ("Zorro S 3.01 - Z12+ Demo" -> "Z12") or, headless, from the "-run X"
+// command line. Alphanumeric only, max 16 chars. Empty if undeterminable.
+void ComputeInstanceTag() {
+    std::string src;
+
+    // 1. Window title: text after " - " ("Z12+ Demo")
+    EnumWinCtx ctx; ctx.pid = GetCurrentProcessId(); ctx.title[0] = '\0'; ctx.found = false;
+    EnumWindows(FindZorroWindowProc, reinterpret_cast<LPARAM>(&ctx));
+    if (ctx.found) {
+        const char* dash = strstr(ctx.title, " - ");
+        if (dash) src = dash + 3;
+    }
+
+    // 2. Fallback: command line "-run <Script>"
+    if (src.empty()) {
+        const char* cl = GetCommandLineA();
+        const char* r = cl ? strstr(cl, "-run ") : nullptr;
+        if (r) src = r + 5;
+    }
+
+    // Sanitize: stop at first space, keep alphanumerics only
+    std::string tag;
+    for (char ch : src) {
+        if (ch == ' ' || ch == '\t') break;
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'))
+            tag += ch;
+    }
+    if (tag.size() > 16) tag.resize(16);
+
+    G.instanceTag = tag;
+    if (!tag.empty())
+        Log::Info("AUTH", "Instance tag: '%s' (shared-account label namespace)", tag.c_str());
+    else
+        Log::Info("AUTH", "Instance tag: (none) — labels use legacy z_N format");
+}
+
+// Optional risk config: Plugin\cTrader.ini with a line "MaxMarginPct = 40".
+// Missing file or line = feature off (0).
+static void LoadRiskConfig() {
+    G.maxMarginPct = 0.0;
+
+    char path[MAX_PATH];
+    sprintf_s(path, "%scTrader.ini", G.dllDir);
+    std::ifstream f(path);
+    if (!f.is_open()) return;
+
+    std::string line;
+    while (std::getline(f, line)) {
+        if (!Utils::ContainsCI(line.c_str(), "MaxMarginPct")) continue;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        double pct = atof(line.c_str() + eq + 1);
+        if (pct > 0.0 && pct <= 100.0) {
+            G.maxMarginPct = pct;
+            Log::Info("AUTH", "Risk config: MaxMarginPct=%.0f%% (instance margin budget)", pct);
+        }
+        break;
+    }
+}
+
 bool Login(const char* user, const char* pwd, const char* type) {
     // === v3 compatible login flow ===
     // 1. DetectEnv
@@ -733,6 +812,12 @@ bool Login(const char* user, const char* pwd, const char* type) {
     // 6. ApplicationAuth
     // 7. If accountId==0 -> FetchAccountsList (auto-detect)
     // 8. AccountAuth (with retry: refresh -> OAuth -> reconnect)
+
+    // Step 0: Determine per-instance tag for shared-account label namespacing
+    ComputeInstanceTag();
+
+    // Step 0b: Optional per-instance margin budget from Plugin\cTrader.ini
+    LoadRiskConfig();
 
     // Step 1: Detect environment from Zorro Type parameter
     DetectEnv(type);

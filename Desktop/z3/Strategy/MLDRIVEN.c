@@ -19,12 +19,12 @@
 
 // ============ KONFIGURÁLHATÓ PARAMÉTEREK ============
 // Backtest & tőke
-#define CFG_BARPERIOD     5       // BarPeriod (perc): 1, 5, 15, 60
-#define CFG_STARTDATE     20260101 // Backtest kezdő dátum
+#define CFG_BARPERIOD     60 // BarPeriod (perc): 1, 5, 15, 60
+#define CFG_STARTDATE     20200101 // Backtest kezdő dátum
 #define CFG_ENDDATE       20261018 // Backtest záró dátum
-#define CFG_CAPITAL       5000     // Kezdő tőke
+#define CFG_CAPITAL       1000    // Kezdő tőke
 #define CFG_LEVERAGE      500      // Leverage
-#define CFG_STOPFACTOR    5.5      // StopFactor (globális)
+#define CFG_STOPFACTOR    0.1     // StopFactor (globális) — tanárral egyező
 
 // SMA algo paraméterek
 #define SMA_MAX_LAYERS    4        // Pyramid max réteg szám
@@ -34,9 +34,11 @@
 // CH algo paraméterek
 #define CH_MAX_POS        2        // Max nyitott pozíció per irány
 #define CH_HEDGE          1       // 1=hedge (long+short), 0=netting
+#define CH_TRAIL_ATR      1.5      // Trailing stop ATR szorzó (0=kikapcs)
 
 // SMA hedge
 #define SMA_HEDGE         1        // 1=hedge (long+short), 0=netting
+#define SMA_TRAIL_ATR     1.5      // SMA trailing stop ATR szorzó (0=kikapcs)
 
 // FTMO limitek (% a start balance-hoz képest)
 #define FTMO_DAILY_1STEP  0.03     // 1-Step daily loss limit (3%)
@@ -45,13 +47,27 @@
 #define FTMO_PROFIT_TARGET 0.10    // Profit target (10%)
 #define FTMO_BESTDAY_RULE 0.50     // Best Day Rule (50%)
 #define FTMO_RESUME_RATIO 0.50     // Napi limit feloldás küszöb (50%)
+
+// PAR fájl beolvasás backtesthez (1=on, 0=off → ML szerver)
+#define USE_PAR_FILE      0        // TESTMODE: .par-ból, TRADEMODE: szerver
+#define PAR_FILE          "Data\\MLDATACOLLECTION.par"
 // ====================================================
 
-#define NUM_ASSETS 7
+// ============ ASSET REGISTRY (EGY HELYEN!) ============
+// Új asset hozzáadás: 1) NUM_ASSETS növelés 2) ASSET_NAMES/CODES bővítés
+// Minden más kód INNEN olvassa — NEM kell máshol módosítani!
+#define NUM_ASSETS 8
+static string ASSET_NAMES[NUM_ASSETS]; // "EUR/USD" format (Zorro)
+static string ASSET_CODES[NUM_ASSETS]; // "EURUSD" format (ML szerver)
+// ======================================================
 #define MAX_LAYERS SMA_MAX_LAYERS
-#define ML_URL_PREDICT "http://127.0.0.1:5001/predict"
-#define ML_URL_FILTER  "http://127.0.0.1:5001/filter"
-#define ML_URL_VOTE    "http://127.0.0.1:5001/algo_vote"
+#define ML_URL_PREDICT    "http://127.0.0.1:5001/predict"
+#define ML_URL_FILTER     "http://127.0.0.1:5001/filter"
+#define ML_URL_VOTE       "http://127.0.0.1:5001/algo_vote"
+#define ML_URL_EXIT_CHECK "http://127.0.0.1:5001/exit_check"
+#define ML_URL_PHANTOM    "http://127.0.0.1:5001/phantom_feedback"
+#define PHANTOM_FEEDBACK_INTERVAL 50  // Hány phantom után küld feedback-et
+#define EXIT_CSV          "Strategy\\CH_ExitData.csv"
 
 // Asset config from CSV
 static int assetActive[NUM_ASSETS];
@@ -87,6 +103,13 @@ static int lastLayerBarS[NUM_ASSETS];
 static int smaHasOpen[NUM_ASSETS];
 static int chHasOpen[NUM_ASSETS];
 
+// FACTORS: OptF per asset:algo:dir (from .fac file)
+// 0 = kikapcsolt, >0 = aktív
+static int facSmaL[NUM_ASSETS];
+static int facSmaS[NUM_ASSETS];
+static int facChL[NUM_ASSETS];
+static int facChS[NUM_ASSETS];
+
 // Phantom tracking (SKIP trade kiértékelés)
 #define PHANTOM_EVAL_BARS 50       // Hány bar múlva értékeljük ki
 static var  phSmaPrice[NUM_ASSETS]; // SMA SKIP belépési ár
@@ -112,6 +135,16 @@ static int ftmoLastDay;
 static int ftmoStopped;
 static var ftmoBestDayProfit;
 static var ftmoTotalProfit;
+
+// CH exit CSV tracking
+static int exitCsvInit;
+
+// Rolling WinRate (last 20 trades)
+#define ROLLING_N 20
+static int rollBuf[ROLLING_N];  // 1=win, 0=loss
+static int rollIdx;
+static int rollCount;
+static int rollLastTotal;       // utolsó ismert NumWinTotal+NumLossTotal
 
 function run()
 {
@@ -140,6 +173,17 @@ function run()
 
 	if(is(INITRUN))
 	{
+		// ═══ ASSET REGISTRY INIT (EGY HELYEN!) ═══
+		// Új asset: itt add hozzá + NUM_ASSETS növeld!
+		ASSET_NAMES[0] = "EUR/USD"; ASSET_CODES[0] = "EURUSD";
+		ASSET_NAMES[1] = "GBP/USD"; ASSET_CODES[1] = "GBPUSD";
+		ASSET_NAMES[2] = "USD/JPY"; ASSET_CODES[2] = "USDJPY";
+		ASSET_NAMES[3] = "USD/CAD"; ASSET_CODES[3] = "USDCAD";
+		ASSET_NAMES[4] = "XAU/USD"; ASSET_CODES[4] = "XAUUSD";
+		ASSET_NAMES[5] = "AUD/USD"; ASSET_CODES[5] = "AUDUSD";
+		ASSET_NAMES[6] = "EUR/CHF"; ASSET_CODES[6] = "EURCHF";
+		ASSET_NAMES[7] = "USD/CHF"; ASSET_CODES[7] = "USDCHF";
+
 		// Load asset config from CSV
 		numActiveAssets = 0;
 		int k;
@@ -154,19 +198,11 @@ function run()
 		if(!csv) csv = file_content("MLDRIVEN_Assets.csv");
 		if(csv)
 		{
-			// Known asset order — parse each from CSV
-			string assetNames[7];
-			assetNames[0] = "EUR/USD";
-			assetNames[1] = "GBP/USD";
-			assetNames[2] = "USD/JPY";
-			assetNames[3] = "USD/CAD";
-			assetNames[4] = "XAU/USD";
-			assetNames[5] = "AUD/USD";
-			assetNames[6] = "EUR/CHF";
+			// Parse asset config from CSV — uses ASSET_NAMES registry
 
 			for(k = 0; k < NUM_ASSETS; k++)
 			{
-				char* line = strstr(csv, assetNames[k]);
+				char* line = strstr(csv, ASSET_NAMES[k]);
 				if(line)
 				{
 					// Skip Asset name → find Code comma
@@ -197,7 +233,7 @@ function run()
 			for(k = 0; k < NUM_ASSETS; k++)
 			{
 				if(assetActive[k])
-					printf("\n  [%d] %s session %d-%d", k, assetNames[k], assetSessStart[k], assetSessEnd[k]);
+					printf("\n  [%d] %s session %d-%d", k, ASSET_NAMES[k], assetSessStart[k], assetSessEnd[k]);
 			}
 		}
 		else
@@ -207,7 +243,7 @@ function run()
 			assetSessStart[0] = 7;  assetSessEnd[0] = 20;
 			assetSessStart[1] = 7;  assetSessEnd[1] = 20;
 			assetSessStart[2] = 1;  assetSessEnd[2] = 16;
-			numActiveAssets = 3;
+			numActiveAssets = 4;
 		}
 
 		for(k = 0; k < NUM_ASSETS; k++)
@@ -224,7 +260,7 @@ function run()
 			mlLifeTime[k] = 20;
 			mlAdxCH[k] = 25;
 			mlMmiCH[k] = 75;
-			mlReady[k] = 0;
+			mlReady[k] = 1;  // default params aktív — phantom trade-ek induljanak
 			lastPredictHour[k] = -1;
 			lastFilterCloseHour[k] = -1;
 			lastChFilterHour[k] = -1;
@@ -244,6 +280,138 @@ function run()
 		ftmoStopped = 0;
 		ftmoBestDayProfit = 0;
 		ftmoTotalProfit = 0;
+		exitCsvInit = 0;
+		rollIdx = 0;
+		rollCount = 0;
+		rollLastTotal = 0;
+		int ri;
+		for(ri = 0; ri < ROLLING_N; ri++) rollBuf[ri] = 0;
+
+		// FACTORS from .fac (tanár WFO eredmény)
+		// GBP/USD: minden 0 → kikapcsolt
+		// EUR/USD: long 0 → csak short
+		// USD/JPY: minden aktív
+		for(k = 0; k < NUM_ASSETS; k++)
+		{
+			facSmaL[k] = 1; facSmaS[k] = 1;
+			facChL[k] = 1;  facChS[k] = 1;
+		}
+		// FACTORS kikapcsolva — diák ML szerver adaptív, jobb mint fix .fac szűrés
+		// EUR/USD (idx 0): long kikapcs mindkét algóban
+		// facSmaL[0] = 0;  // OptF .000, PF 0.61
+		// facChL[0] = 0;   // OptF .000, PF 0.89
+		// GBP/USD (idx 1): teljes kikapcs
+		// facSmaL[1] = 0; facSmaS[1] = 0;  // OptF .000, PF 0.84
+		// facChL[1] = 0;  facChS[1] = 0;   // OptF .000, PF 0.95
+		// USD/CHF (idx 7): SMA kikapcs — CDL teszt, SMA gyenge ezen a páron
+		facSmaL[7] = 0; facSmaS[7] = 0;
+
+		printf("\n[FAC] EUR/USD: SMA L=%d S=%d CH L=%d S=%d", facSmaL[0], facSmaS[0], facChL[0], facChS[0]);
+		printf("\n[FAC] GBP/USD: SMA L=%d S=%d CH L=%d S=%d", facSmaL[1], facSmaS[1], facChL[1], facChS[1]);
+		printf("\n[FAC] USD/JPY: SMA L=%d S=%d CH L=%d S=%d", facSmaL[2], facSmaS[2], facChL[2], facChS[2]);
+		printf("\n[FAC] USD/CHF: SMA L=%d S=%d CH L=%d S=%d", facSmaL[7], facSmaS[7], facChL[7], facChS[7]);
+
+		// =========================================
+		// PAR FILE LOADING (backtest only)
+		// =========================================
+		if(USE_PAR_FILE && !is(TRADEMODE))
+		{
+			string parData = file_content(PAR_FILE);
+			if(!parData) parData = file_content("Data/MLDATACOLLECTION.par");
+			if(!parData) parData = file_content("MLDATACOLLECTION.par");
+			if(parData)
+			{
+				for(k = 0; k < NUM_ASSETS; k++)
+				{
+					char* pLine = strstr(parData, ASSET_NAMES[k]);
+					if(pLine)
+					{
+						// Skip "EUR/USD:CH " prefix → find first space after colon
+						char* pp = strchr(pLine, ' ');
+						if(pp)
+						{
+							var v[12];
+							int vi = 0;
+							while(vi < 12 && pp)
+							{
+								while(*pp == ' ') pp++;
+								if(*pp == '+') pp++; // skip leading +
+								v[vi] = atof(pp);
+								vi++;
+								// advance to next space
+								while(*pp && *pp != ' ' && *pp != '=' && *pp != '\n') pp++;
+								if(*pp == '=' || *pp == '\n' || *pp == 0) break;
+							}
+							if(vi >= 12)
+							{
+								mlSmaTF[k]        = clamp((int)(v[0] + 0.5), 1, 8);
+								mlFastMA[k]       = clamp((int)(v[1] + 0.5), 10, 40);
+								mlSlowMA[k]       = clamp((int)(v[2] + 0.5), 40, 100);
+								mlSmaStop_x10[k]  = clamp((int)(v[3] + 0.5), 15, 50);
+								mlAdxSMA[k]       = clamp((int)(v[4] + 0.5), 15, 40);
+								mlMmiSMA[k]       = clamp((int)(v[5] + 0.5), 60, 85);
+								mlN[k]            = clamp((int)(v[6] + 0.5), 30, 120);
+								mlFactor_x100[k]  = clamp((int)(v[7] + 0.5), 10, 40);
+								mlChStop_x10[k]   = clamp((int)(v[8] + 0.5), 15, 50);
+								mlLifeTime[k]     = clamp((int)(v[9] + 0.5), 10, 40);
+								mlAdxCH[k]        = clamp((int)(v[10] + 0.5), 15, 40);
+								mlMmiCH[k]        = clamp((int)(v[11] + 0.5), 60, 85);
+								mlReady[k] = 1;
+								printf("\n[PAR] %s: TF=%d SMA=%d/%d Stop=%d adxS=%d mmiS=%d N=%d F=%d chSt=%d Life=%d adxC=%d mmiC=%d",
+									ASSET_NAMES[k], mlSmaTF[k], mlFastMA[k], mlSlowMA[k],
+									mlSmaStop_x10[k], mlAdxSMA[k], mlMmiSMA[k],
+									mlN[k], mlFactor_x100[k], mlChStop_x10[k],
+									mlLifeTime[k], mlAdxCH[k], mlMmiCH[k]);
+							}
+							else
+								printf("\n[PAR] %s: only %d params parsed (need 12)", ASSET_NAMES[k], vi);
+						}
+					}
+				}
+				printf("\n[PAR] Loaded %s for backtest", PAR_FILE);
+			}
+			else
+				printf("\n[PAR] WARNING: %s NOT FOUND — using defaults", PAR_FILE);
+		}
+	}
+
+	// CH Exit CSV header (TRADEMODE only, first bar)
+	if(is(TRADEMODE) && !exitCsvInit)
+	{
+		// Append mode — only write header if file doesn't exist
+		if(!file_content(EXIT_CSV))
+			file_append(EXIT_CSV, "Asset,Dir,BarsHeld,PnlATR,DistRegATR,Momentum3,RSI,ADX,ChWidthATR,ATRchg,Action,FuturePnlATR\n");
+		exitCsvInit = 1;
+	}
+
+	// =========================================
+	// POSITION RECOVERY (restart után)
+	// =========================================
+	// Első TRADEMODE bar: layersLong/Short visszaállítása
+	// a broker-ből jövő nyitott pozíciók alapján
+	if(is(TRADEMODE) && Bar == 1)
+	{
+		printf("\n[RECOVERY] Checking open positions after restart...");
+		int k;
+		for(k = 0; k < NUM_ASSETS; k++)
+		{
+			if(!assetActive[k]) continue;
+			asset(ASSET_NAMES[k]);
+			algo("SMA");
+			int smaL = NumOpenLong;
+			int smaS = NumOpenShort;
+			layersLong[k] = smaL;
+			layersShort[k] = smaS;
+			smaHasOpen[k] = (smaL + smaS > 0);
+			algo("CH");
+			int chL = NumOpenLong;
+			int chS = NumOpenShort;
+			chHasOpen[k] = (chL + chS > 0);
+			if(smaL || smaS || chL || chS)
+				printf("\n[RECOVERY] %s SMA L=%d S=%d layers, CH L=%d S=%d pos",
+					ASSET_NAMES[k], smaL, smaS, chL, chS);
+		}
+		printf("\n[RECOVERY] Position recovery complete.");
 	}
 
 	// =========================================
@@ -306,16 +474,12 @@ function run()
 		// If stopped → close all and skip trading
 		if(ftmoStopped)
 		{
-			// Close everything (all active assets)
-			string allAssets[7];
-			allAssets[0] = "EUR/USD"; allAssets[1] = "GBP/USD"; allAssets[2] = "USD/JPY";
-			allAssets[3] = "USD/CAD"; allAssets[4] = "XAU/USD"; allAssets[5] = "AUD/USD";
-			allAssets[6] = "EUR/CHF";
+			// Close everything (all active assets) — ASSET_NAMES registry
 			int fa;
 			for(fa = 0; fa < NUM_ASSETS; fa++)
 			{
 				if(!assetActive[fa]) continue;
-				asset(allAssets[fa]);
+				asset(ASSET_NAMES[fa]);
 				algo("SMA"); exitLong(); exitShort();
 				algo("CH"); exitLong(); exitShort();
 			}
@@ -342,18 +506,13 @@ function run()
 				equity, dailyLoss, dailyLossLimit, totalLoss, maxLossLimit, ftmoHighBalance);
 	}
 
-	while(asset(loop("EUR/USD", "GBP/USD", "USD/JPY",
-		"USD/CAD", "XAU/USD", "AUD/USD", "EUR/CHF")))
+	// ═══ ASSET LOOP — ASSET_NAMES registry-ből ═══
+	int _ai;
+	for(_ai = 0; _ai < NUM_ASSETS; _ai++)
 	{
-		int aIdx = 0;
-		string assetCode = "EURUSD";
-		if(strstr(Asset, "EUR/USD"))      { aIdx = 0; assetCode = "EURUSD"; }
-		else if(strstr(Asset, "GBP/USD")) { aIdx = 1; assetCode = "GBPUSD"; }
-		else if(strstr(Asset, "USD/JPY")) { aIdx = 2; assetCode = "USDJPY"; }
-		else if(strstr(Asset, "USD/CAD")) { aIdx = 3; assetCode = "USDCAD"; }
-		else if(strstr(Asset, "XAU/USD")) { aIdx = 4; assetCode = "XAUUSD"; }
-		else if(strstr(Asset, "AUD/USD")) { aIdx = 5; assetCode = "AUDUSD"; }
-		else if(strstr(Asset, "EUR/CHF")) { aIdx = 6; assetCode = "EURCHF"; }
+		if(!asset(ASSET_NAMES[_ai])) continue;
+		int aIdx = _ai;
+		string assetCode = ASSET_CODES[_ai];
 
 		// =========================================
 		// SHARED INDICATORS — ALL series() BEFORE any continue!
@@ -390,9 +549,18 @@ function run()
 		int SlowMA = mlSlowMA[aIdx];
 		if(FastMA >= SlowMA) SlowMA = FastMA + 10;
 
+		// TimeFrame váltás fix: series() reset ha TF változott
+		static int lastTF[NUM_ASSETS];
 		TimeFrame = smaTF;
-		vars SMA_F = series(SMA(Close, FastMA));
-		vars SMA_S = series(SMA(Close, SlowMA));
+		vars CloseTF = series(priceClose());
+		vars SMA_F = series(SMA(CloseTF, FastMA));
+		vars SMA_S = series(SMA(CloseTF, SlowMA));
+		if(smaTF != lastTF[aIdx])
+		{
+			SMA_F[0] = 0;
+			SMA_S[0] = 0;
+			lastTF[aIdx] = smaTF;
+		}
 		TimeFrame = 1;
 
 		// Skip inactive assets (from CSV) — AFTER series() for consistency!
@@ -458,13 +626,45 @@ function run()
 		var totalTrades = NumWinTotal + NumLossTotal;
 		var WinRate = 0;
 		if(totalTrades > 0) WinRate = (var)NumWinTotal / totalTrades;
+
+		// Rolling WinRate update (globális, nem asset-specifikus)
+		if(aIdx == 0 && totalTrades > rollLastTotal)
+		{
+			int newTrades = (int)(totalTrades - rollLastTotal);
+			int newWins = NumWinTotal - (rollLastTotal - (int)(rollLastTotal * (1.0 - WinRate) + 0.5));
+			// Egyszerűbb: utolsó trade win ha NumWinTotal nőtt
+			int wasWin = 0;
+			if(totalTrades > rollLastTotal)
+			{
+				// Ha NumWinTotal nőtt az utolsó óta → win, különben loss
+				static int prevWinTotal;
+				if(rollLastTotal == 0) prevWinTotal = NumWinTotal;
+				if(NumWinTotal > prevWinTotal) wasWin = 1;
+				prevWinTotal = NumWinTotal;
+			}
+			rollBuf[rollIdx] = wasWin;
+			rollIdx = rollIdx + 1;
+			if(rollIdx >= ROLLING_N) rollIdx = 0;
+			if(rollCount < ROLLING_N) rollCount = rollCount + 1;
+			rollLastTotal = (int)totalTrades;
+		}
+		var RollingWR = 0.5;
+		if(rollCount > 0)
+		{
+			int wins = 0;
+			int ri;
+			for(ri = 0; ri < rollCount; ri++) wins = wins + rollBuf[ri];
+			RollingWR = (var)wins / (var)rollCount;
+		}
+
 		var Current_State = (Equity - Capital) / Capital * 100;
 
 		// =========================================
 		// ML PARAM PREDICTION (hourly)
 		// =========================================
+		// USE_PAR_FILE + TESTMODE: params already loaded from .par, skip HTTP
 		int callPredict = 0;
-		if(!Train && hr != lastPredictHour[aIdx])
+		if(!Train && hr != lastPredictHour[aIdx] && !(USE_PAR_FILE && is(TESTMODE)))
 		{
 			if(is(TRADEMODE)) callPredict = 1;
 			if(is(TESTMODE) && hr == 12) callPredict = 1;
@@ -478,7 +678,7 @@ function run()
 				"{\"features\":[%.4f,%.4f,%.6f,%.2f,%.4f,%.4f,%.2f,%.4f,%.4f,%.4f,%.4f,%.2f]}",
 				ATR_Pct, Range_Pct, Volatility, adx, Trend_Bias,
 				Trend_Quality, rsi, hurst, Return_20, BB_Width,
-				WinRate, Current_State);
+				RollingWR, Current_State);
 
 			string resp = http_transfer(ML_URL_PREDICT, postBuf);
 			if(resp)
@@ -517,9 +717,25 @@ function run()
 			}
 			else
 			{
-				if(Bar % 2000 == 0)
-					printf("\n[ML] %s predict: NO RESPONSE", assetCode);
+				// ML szerver nem válaszol — megtartjuk az utolsó paramétereket
+				if(mlReady[aIdx])
+					printf("\n[ML] %s predict: NO RESPONSE — using last params", assetCode);
+				else if(Bar % 2000 == 0)
+					printf("\n[ML] %s predict: NO RESPONSE — no params yet", assetCode);
 			}
+		}
+
+		// =========================================
+		// CH EXIT: ML exit_check + session end (BEFORE skipBar!)
+		// =========================================
+		algo("CH");
+		int sessionEnd = (hr >= assetSessEnd[aIdx]);
+
+		// Session end: close all CH trades
+		if((NumOpenLong > 0 || NumOpenShort > 0) && sessionEnd)
+		{
+			exitLong();
+			exitShort();
 		}
 
 		// Skip bar
@@ -547,7 +763,7 @@ function run()
 					"{\"features\":[%.4f,%.4f,%.6f,%.2f,%.4f,%.4f,%.2f,%.4f,%.4f,%.4f,%.4f,%.2f]}",
 					ATR_Pct, Range_Pct, Volatility, adx, Trend_Bias,
 					Trend_Quality, rsi, hurst, Return_20, BB_Width,
-					WinRate, Current_State);
+					RollingWR, Current_State);
 				string voteResp = http_transfer(ML_URL_VOTE, voteBuf);
 				if(voteResp)
 				{
@@ -625,56 +841,7 @@ function run()
 			layersShort[aIdx] = 0;
 		}
 
-		// =========================================
-		// CH EXIT: decision tree + session end
-		// =========================================
-		algo("CH");
-		int sessionEnd = (hr >= assetSessEnd[aIdx]);
-
-		// CH LONG exit decision (ATR-based thresholds)
-		if(NumOpenLong > 0 && !sessionEnd)
-		{
-			int breakout = (price > EntryHigh);
-			var distToTarget = EntryHigh - price;
-			int atMiddle = (abs(price - RegLine) < 0.1 * h4atr);
-			int momentumOK = (Close[0] > Close[1]);
-
-			if(breakout)
-			{
-				// Kitörés felfelé → tartjuk (trend lehetőség)
-			}
-			else if(atMiddle && !momentumOK && distToTarget < 0.2 * h4atr)
-			{
-				printf("\n[CH-EXIT] %s LONG: middle+weak+no room (dist=%.1f atr=%.1f)", assetCode, distToTarget/PIP, h4atr/PIP);
-				exitLong();
-			}
-		}
-
-		// CH SHORT exit decision (ATR-based thresholds)
-		if(NumOpenShort > 0 && !sessionEnd)
-		{
-			int breakout = (price < EntryLow);
-			var distToTarget = price - EntryLow;
-			int atMiddle = (abs(price - RegLine) < 0.1 * h4atr);
-			int momentumOK = (Close[0] < Close[1]);
-
-			if(breakout)
-			{
-				// Kitörés lefelé → tartjuk (trend lehetőség)
-			}
-			else if(atMiddle && !momentumOK && distToTarget < 0.2 * h4atr)
-			{
-				printf("\n[CH-EXIT] %s SHORT: middle+weak+no room (dist=%.1f atr=%.1f)", assetCode, distToTarget/PIP, h4atr/PIP);
-				exitShort();
-			}
-		}
-
-		// Session end: close remaining CH trades
-		if(sessionEnd)
-		{
-			exitLong();
-			exitShort();
-		}
+		// (CH EXIT is now before skipBar)
 
 		// =========================================
 		// SMA PARTIAL CLOSE: LIFO (largest lot first)
@@ -733,7 +900,7 @@ function run()
 				"{\"features\":[%.4f,%.4f,%.6f,%.2f,%.4f,%.4f,%.2f,%.4f,%.4f,%.4f,%.4f,%.2f],\"direction\":%d,\"entry_type\":\"SMA\"}",
 				ATR_Pct, Range_Pct, Volatility, adx, Trend_Bias,
 				Trend_Quality, rsi, hurst, Return_20, BB_Width,
-				WinRate, Current_State,
+				RollingWR, Current_State,
 				filterDir);
 			string filterResp = http_transfer(ML_URL_FILTER, filterBuf);
 			if(filterResp)
@@ -805,44 +972,56 @@ function run()
 		int smaHedgeOK_L = SMA_HEDGE || (NumOpenShort == 0);
 		int smaHedgeOK_S = SMA_HEDGE || (NumOpenLong == 0);
 
-		if(safeToOpen && smaOK_L && smaFilterL && smaHedgeOK_L && layersLong[aIdx] == 0
+		if(safeToOpen && smaOK_L && smaFilterL && smaHedgeOK_L && facSmaL[aIdx] && layersLong[aIdx] == 0
 			&& (Bar - lastLayerBarL[aIdx]) >= addCooldown)
 		{
 			Lots = smaBaseLots;
 			Stop = h4atr * smaStop;
+			TrailLock = SMA_TRAIL_ATR * h4atr;
+			TrailStep = 0.25;
 			LifeTime = 0;
+			brokerCommand(SET_ORDERTEXT, "MLDRIVEN_SMA");
 			enterLong();
 			layersLong[aIdx] = 1;
 			lastLayerBarL[aIdx] = Bar;
-			printf("\n[ENTRY] SMA LONG %s @ %.5f lots=%d (%.2f std)", assetCode, price, smaBaseLots, smaBaseLots * 0.01);
+			printf("\n[ENTRY] SMA LONG %s @ %.5f lots=%d trail=%.1fp", assetCode, price, smaBaseLots, TrailLock/PIP);
 		}
 		else if(safeToOpen && smaAddL)
 		{
 			Lots = smaBaseLots + layersLong[aIdx];
 			Stop = h4atr * smaStop;
+			TrailLock = SMA_TRAIL_ATR * h4atr;
+			TrailStep = 0.25;
 			LifeTime = 0;
+			brokerCommand(SET_ORDERTEXT, "MLDRIVEN_SMA");
 			enterLong();
 			layersLong[aIdx] = layersLong[aIdx] + 1;
 			lastLayerBarL[aIdx] = Bar;
 			printf("\n[ADD] SMA LONG %s @ %.5f lots=%d layer=%d", assetCode, price, smaBaseLots + layersLong[aIdx] - 1, layersLong[aIdx]);
 		}
 
-		if(safeToOpen && smaOK_S && smaFilterS && smaHedgeOK_S && layersShort[aIdx] == 0
+		if(safeToOpen && smaOK_S && smaFilterS && smaHedgeOK_S && facSmaS[aIdx] && layersShort[aIdx] == 0
 			&& (Bar - lastLayerBarS[aIdx]) >= addCooldown)
 		{
 			Lots = smaBaseLots;
 			Stop = h4atr * smaStop;
+			TrailLock = SMA_TRAIL_ATR * h4atr;
+			TrailStep = 0.25;
 			LifeTime = 0;
+			brokerCommand(SET_ORDERTEXT, "MLDRIVEN_SMA");
 			enterShort();
 			layersShort[aIdx] = 1;
 			lastLayerBarS[aIdx] = Bar;
-			printf("\n[ENTRY] SMA SHORT %s @ %.5f lots=%d (%.2f std)", assetCode, price, smaBaseLots, smaBaseLots * 0.01);
+			printf("\n[ENTRY] SMA SHORT %s @ %.5f lots=%d trail=%.1fp", assetCode, price, smaBaseLots, TrailLock/PIP);
 		}
 		else if(safeToOpen && smaAddS)
 		{
 			Lots = smaBaseLots + layersShort[aIdx];
 			Stop = h4atr * smaStop;
+			TrailLock = SMA_TRAIL_ATR * h4atr;
+			TrailStep = 0.25;
 			LifeTime = 0;
+			brokerCommand(SET_ORDERTEXT, "MLDRIVEN_SMA");
 			enterShort();
 			layersShort[aIdx] = layersShort[aIdx] + 1;
 			lastLayerBarS[aIdx] = Bar;
@@ -865,7 +1044,7 @@ function run()
 				"{\"features\":[%.4f,%.4f,%.6f,%.2f,%.4f,%.4f,%.2f,%.4f,%.4f,%.4f,%.4f,%.2f],\"direction\":%d,\"entry_type\":\"CH\"}",
 				ATR_Pct, Range_Pct, Volatility, adx, Trend_Bias,
 				Trend_Quality, rsi, hurst, Return_20, BB_Width,
-				WinRate, Current_State,
+				RollingWR, Current_State,
 				chDir);
 			string chResp = http_transfer(ML_URL_FILTER, chFilterBuf);
 			if(chResp)
@@ -898,22 +1077,28 @@ function run()
 		int chHedgeOK_L = CH_HEDGE || (NumOpenShort == 0);
 		int chHedgeOK_S = CH_HEDGE || (NumOpenLong == 0);
 
-		if(safeToOpen && chOK_L && chFilterL && chHedgeOK_L && NumOpenLong < chMaxPos && !sessionEnd)
+		if(safeToOpen && chOK_L && chFilterL && chHedgeOK_L && facChL[aIdx] && NumOpenLong < chMaxPos && !sessionEnd)
 		{
 			Lots = chLots;
 			Stop = h4atr * chStop;
+			TrailLock = CH_TRAIL_ATR * h4atr;
+			TrailStep = 0.25;
 			LifeTime = 0;
+			brokerCommand(SET_ORDERTEXT, "MLDRIVEN_CH");
 			enterLong();
-			printf("\n[ENTRY] CH LONG %s @ %.5f lots=%d (%.2f std)", assetCode, price, chLots, chLots * 0.01);
+			printf("\n[ENTRY] CH LONG %s @ %.5f lots=%d trail=%.1fp", assetCode, price, chLots, TrailLock/PIP);
 		}
 
-		if(safeToOpen && chOK_S && chFilterS && chHedgeOK_S && NumOpenShort < chMaxPos && !sessionEnd)
+		if(safeToOpen && chOK_S && chFilterS && chHedgeOK_S && facChS[aIdx] && NumOpenShort < chMaxPos && !sessionEnd)
 		{
 			Lots = chLots;
 			Stop = h4atr * chStop;
+			TrailLock = CH_TRAIL_ATR * h4atr;
+			TrailStep = 0.25;
 			LifeTime = 0;
+			brokerCommand(SET_ORDERTEXT, "MLDRIVEN_CH");
 			enterShort();
-			printf("\n[ENTRY] CH SHORT %s @ %.5f lots=%d (%.2f std)", assetCode, price, chLots, chLots * 0.01);
+			printf("\n[ENTRY] CH SHORT %s @ %.5f lots=%d trail=%.1fp", assetCode, price, chLots, TrailLock/PIP);
 		}
 
 		// =========================================
@@ -947,6 +1132,29 @@ function run()
 				assetCode, phChDir[aIdx], phChLots[aIdx], pnlPips, pnlDollar,
 				phChWin, phChLoss, phChPnl);
 			phChBar[aIdx] = 0;
+		}
+
+		// =========================================
+		// PHANTOM FEEDBACK to server (periodikus)
+		// =========================================
+		if(!Train && is(TRADEMODE) && aIdx == 0)
+		{
+			int phSmaTotal = phSmaWin + phSmaLoss;
+			int phChTotal = phChWin + phChLoss;
+			if(phSmaTotal > 0 && phSmaTotal % PHANTOM_FEEDBACK_INTERVAL == 0)
+			{
+				char phBuf[256];
+				sprintf(phBuf, "{\"entry_type\":\"SMA\",\"wins\":%d,\"losses\":%d,\"pnl\":%.2f}",
+					phSmaWin, phSmaLoss, phSmaPnl);
+				http_transfer(ML_URL_PHANTOM, phBuf);
+			}
+			if(phChTotal > 0 && phChTotal % PHANTOM_FEEDBACK_INTERVAL == 0)
+			{
+				char phBuf[256];
+				sprintf(phBuf, "{\"entry_type\":\"CH\",\"wins\":%d,\"losses\":%d,\"pnl\":%.2f}",
+					phChWin, phChLoss, phChPnl);
+				http_transfer(ML_URL_PHANTOM, phBuf);
+			}
 		}
 
 		// =========================================
