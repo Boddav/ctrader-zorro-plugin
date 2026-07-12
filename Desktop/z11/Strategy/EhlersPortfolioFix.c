@@ -31,6 +31,7 @@ void riskGuard()
 		RiskHalt = 1;
 	if(RiskMaxDD > 0 && Eq < PeakEquity - 0.01*RiskMaxDD*abs(PeakEquity))
 		RiskHalt = 2;	// stays halted, manual restart required
+	if(!Live) RiskHalt = 0;	// guards protect the live account only
 	if(RiskHalt) {	// flatten current component, no new entries
 		exitLong("*");
 		exitShort("*");
