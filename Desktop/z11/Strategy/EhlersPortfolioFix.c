@@ -4,16 +4,18 @@
 //   USD/JPY CYCL (session 5-15), AUD/USD CYCL (no session)
 // params = 10-cycle WFO averages, no retraining needed
 
-var RiskDayLoss = 0;	// live: 4 = halt at -4% equity in a day, 0 = off
-var RiskMaxDD = 0;	// live: 10 = halt at -10% from equity peak, 0 = off
-var MarginPct = 3;	// margin per component in % of capital
+var RiskDayLoss = 4;	// halt at -4% equity in a day, 0 = off
+var RiskMaxDD = 10;	// halt at -10% from equity peak, 0 = off
+var RiskPct = 3;	// % of balance risked per trade; 3% -> 1 microlot at 3000$
+			// (drop to 1-1.5% on a live/prop account of 6000$+)
 
 int EntryOK = 1, RiskHalt = 0, RiskDay = 0;
 var PeakEquity = 0, DayStartEquity = 0;
 
 void riskGuard()
 {
-	var Eq = Equity;
+	var Eq = abs(Capital) + ProfitTotal;	// simulated equity in tests
+	if(Live) Eq = Equity;	// real account equity when trading
 	if(is(INITRUN)) {
 		PeakEquity = DayStartEquity = Eq;
 		RiskHalt = 0;
@@ -36,6 +38,21 @@ void riskGuard()
 	EntryOK = !RiskHalt;
 }
 
+// position size from stop distance: risk RiskPct% of balance per trade
+// leverage only lowers the margin requirement, never raises the size
+int setRiskLots()
+{
+	var Base = Balance;
+	if(Base <= 0) Base = abs(Capital);
+	Margin = 0.000001;	// tiny margin -> size comes from Lots (eval.c pattern)
+	var RiskPerLot = (Stop/PIP)*PIPCost;	// $ loss at stop for 1 lot
+	if(RiskPerLot <= 0) return 0;
+	int L = (0.01*RiskPct*Base)/RiskPerLot;
+	if(L < 1) return 0;	// account too small for this stop - skip
+	Lots = L;
+	return 1;
+}
+
 int sessionOK(var S1, var S2)
 {
 	int H = hour(0);
@@ -55,7 +72,7 @@ void tradeTrend()	// USD/JPY: dip buy/rally sell in CTI-confirmed trend
 	Stop = 14.5 * ATR(100);
 	Trail = 0;
 
-	int Ok = EntryOK && sessionOK(5,18);
+	int Ok = EntryOK && sessionOK(5.,18.) && setRiskLots();
 	if(Ok && CTIs[0] > 0.43 && valley(Trends))
 		enterLong();
 	else if(Ok && CTIs[0] < -0.43 && peak(Trends))
@@ -73,7 +90,7 @@ void tradeCycle()	// StochEhlers counter-trend at the band edges
 	Stop = StopD * ATR(100);
 	Trail = 4 * ATR(100);
 
-	int Ok = EntryOK && sessionOK(S1,S2);
+	int Ok = EntryOK && sessionOK(S1,S2) && setRiskLots();
 	if(Ok && crossUnder(Stochs,0.21))
 		enterLong();
 	else if(Ok && crossOver(Stochs,0.79))
@@ -82,19 +99,18 @@ void tradeCycle()	// StochEhlers counter-trend at the band edges
 
 function run()
 {
-	set(LOGFILE);
+	set(LOGFILE,PRELOAD);	// PRELOAD: fill lookback from local history
 	BarPeriod = 60;
 	LookBack = 2500;
 	StartDate = 2019;	// backtest period; ignored in Trade mode
 	EndDate = 20241231;
-	Capital = -10000;
+	Capital = 3000;		// demo account size
 
 	while(asset(loop("USD/JPY","AUD/USD")))
 	while(algo(loop("TRND","CYCL")))
 	{
 		TimeFrame = 4;
 		MaxLong = MaxShort = 1;
-		Margin = 0.01 * MarginPct * abs(Capital);
 		riskGuard();
 		if(strstr(Algo,"TRND")) {
 			if(strstr(Asset,"USD/JPY"))	// TRND only on USD/JPY
