@@ -1,6 +1,6 @@
 # Jev kapuőr (JevGate)
 
-Külön modul a cTrader pluginban. Minden **új pozíció** megnyitása előtt (`BrokerBuy2` → `BuyOrder`)
+Külön modul a cTraderJev pluginban (`../`, a v4.12 érintetlen). Minden **új pozíció** megnyitása előtt (`BrokerBuy2` → `BuyOrder`)
 megkérdezi a helyi Jev szervert (`JevServer.py`, `POST http://127.0.0.1:5003/gate`), hogy mehet-e.
 A stratégiákhoz (pl. a zárt forrású Z1+ / Z12+) nem kell hozzányúlni.
 

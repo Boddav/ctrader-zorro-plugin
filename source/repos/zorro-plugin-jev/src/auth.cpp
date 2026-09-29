@@ -4,6 +4,7 @@
 #include "../include/websocket.h"
 #include "../include/logger.h"
 #include "../include/utils.h"
+#include "../jevgate/jevgate.h"
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -818,6 +819,9 @@ bool Login(const char* user, const char* pwd, const char* type) {
 
     // Step 0b: Optional per-instance margin budget from Plugin\cTrader.ini
     LoadRiskConfig();
+
+    // Step 0c: Optional Jev gate, own subfolder Plugin\JevGate\ (separate from cTrader.ini)
+    JevGate::LoadConfig();
 
     // Step 1: Detect environment from Zorro Type parameter
     DetectEnv(type);

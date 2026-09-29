@@ -43,19 +43,12 @@ cannot stop two strategies on the same account from filling it up together.
 `MaxMarginPct` caps the total margin *this* instance may hold, leaving a
 buffer for open-trade drawdown and preventing shared-account margin calls.
 
-### Depth of Market (separate subfolder)
-`BrokerCommand(GET_BOOK)` (62) returns the cTrader order book for the symbol set with
-`SET_SYMBOL` as a T2 array (bids negative, asks positive, best first, max 40 levels).
-Live only. Code and notes: `source/repos/zorro-plugin-windows-32-4/jevdepth/`.
-
-### JevGate (optional, separate subfolder)
-An optional gate asks a local Jev (TypeSafe AI) server before every **new** position
-(`BrokerBuy2`), without touching the strategy code — e.g. for closed-source Z systems.
-Configured in its own folder, independent of `cTrader.ini`:
-`<Zorro>\Plugin\JevGate\JevGate.ini` (sample and details in
-`source/repos/zorro-plugin-windows-32-4/jevgate/`). Modes: `off` (default, file missing),
-`log` (ask and record in `JevGate_log.csv`, never block), `enforce` (reject below `MinProb`).
-Closing orders are never gated. Server: `JevServer.py` from Boddav/ai-trading-advisor (`/gate`).
+### cTraderJev — separate plugin with Jev (does not change v4.12)
+The Jev additions live in their **own plugin project**, `source/repos/zorro-plugin-jev/`,
+built as **`cTraderJev.dll`** (plugin name `cTraderJev`, version `4.12.0-jev1`). The v4.12
+plugin in `source/repos/zorro-plugin-windows-32-4/` is unchanged. Both DLLs can sit in the
+same Zorro `Plugin` folder; choose per Zorro window via the `Plugin` column of `accounts.csv`.
+See `source/repos/zorro-plugin-jev/README.md`.
 
 ## Current version: v4.12.0
 

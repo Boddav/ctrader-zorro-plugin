@@ -1,6 +1,6 @@
 # Depth of Market (jevdepth)
 
-Külön modul a cTrader pluginban: feliratkozik a cTrader ajánlati könyvére (DoM,
+Külön modul a cTraderJev pluginban: feliratkozik a cTrader ajánlati könyvére (DoM,
 `ProtoOADepthEvent`), és a Zorro szabványos `GET_BOOK` (62) parancsán adja át.
 
 ```c

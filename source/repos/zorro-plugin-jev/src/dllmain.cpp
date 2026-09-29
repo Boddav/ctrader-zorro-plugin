@@ -1,4 +1,5 @@
 #include "../include/state.h"
+#include "../jevdepth/jevdepth.h"
 #include "../include/protocol.h"
 #include "../include/websocket.h"
 #include "../include/auth.h"
@@ -334,6 +335,14 @@ static unsigned __stdcall NetworkThread(void* param) {
                 Account::HandleTraderUpdateEvent(buffer);
                 break;
 
+            case ToInt(PayloadType::DepthEvent):
+                JevDepth::HandleDepthEvent(buffer);
+                break;
+
+            case ToInt(PayloadType::SubscribeDepthQuotesRes):
+                Log::Diag(1, "SubscribeDepthQuotesRes received");
+                break;
+
             case ToInt(PayloadType::SubscribeSpotsRes):
                 Log::Diag(1, "SubscribeSpotsRes received");
                 break;
@@ -420,6 +429,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         if (lastSlash) *(lastSlash + 1) = '\0';
 
         StateInit::Init();
+        JevDepth::Init();  // jevdepth/: Depth of Market for GET_BOOK
     }
     else if (reason == DLL_PROCESS_DETACH) {
         StopNetworkThread();
@@ -453,7 +463,7 @@ DLLFUNC int BrokerOpen(char* Name, int(__cdecl* fpMessage)(const char*),
     // Debug: write version + dllDir + log test to known path
     {
         char dbgPath[MAX_PATH];
-        sprintf_s(dbgPath, "%scTrader_debug.txt", G.dllDir);
+        sprintf_s(dbgPath, "%s%s_debug.txt", G.dllDir, PLUGIN_NAME);
         FILE* dbg = nullptr;
         fopen_s(&dbg, dbgPath, "w");
         if (dbg) {
@@ -461,7 +471,7 @@ DLLFUNC int BrokerOpen(char* Name, int(__cdecl* fpMessage)(const char*),
 
             // Test: can we open cTrader.log?
             char logPath[MAX_PATH];
-            sprintf_s(logPath, "%scTrader.log", G.dllDir);
+            sprintf_s(logPath, "%s%s.log", G.dllDir, PLUGIN_NAME);
             FILE* logTest = nullptr;
             errno_t logErr = fopen_s(&logTest, logPath, "a");
             fprintf(dbg, "log fopen_s(\"%s\",\"a\") = %d (f=%p)\n", logPath, (int)logErr, (void*)logTest);
@@ -491,7 +501,7 @@ DLLFUNC int BrokerOpen(char* Name, int(__cdecl* fpMessage)(const char*),
     // Show version in Zorro message window
     if (BrokerMessage) {
         char verMsg[128];
-        sprintf_s(verMsg, "cTrader v%s loaded", PLUGIN_VERSION);
+        sprintf_s(verMsg, "%s v%s loaded", PLUGIN_NAME, PLUGIN_VERSION);
         BrokerMessage(verMsg);
     }
 
@@ -1504,6 +1514,9 @@ DLLFUNC double BrokerCommand(int Command, DWORD dwParameter) {
             G.diagLevel = (int)dwParameter;
             Log::Info("CMD", "Diagnostics level set to %d", G.diagLevel);
             return G.diagLevel;
+
+        case JEVDEPTH_GET_BOOK: // 62 - order book (jevdepth/), T2 array in dwParameter
+            return JevDepth::GetBook((T2*)dwParameter, JEVDEPTH_MAX_QUOTES);
 
         case SET_SYMBOL: // 132
             if (dwParameter) {

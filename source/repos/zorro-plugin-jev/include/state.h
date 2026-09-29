@@ -1,0 +1,290 @@
+#pragma once
+
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <winhttp.h>
+#include <string>
+#include <map>
+#include <vector>
+
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "winhttp.lib")
+
+#define DLLFUNC extern "C" __declspec(dllexport)
+
+// Callbacks from Zorro
+extern int(__cdecl* BrokerMessage)(const char* Text);
+extern int(__cdecl* BrokerProgress)(intptr_t Progress);
+
+// Environment
+enum class Env { Demo, Live };
+
+// RAII lock guard for CRITICAL_SECTION
+class CsLock {
+    CRITICAL_SECTION& cs_;
+public:
+    CsLock(CRITICAL_SECTION& cs) : cs_(cs) { EnterCriticalSection(&cs_); }
+    ~CsLock() { LeaveCriticalSection(&cs_); }
+    CsLock(const CsLock&) = delete;
+    CsLock& operator=(const CsLock&) = delete;
+};
+
+// Symbol info from SymbolsListRes + SymbolByIdRes
+struct SymbolInfo {
+    long long symbolId = 0;
+    std::string name;
+    int digits = 5;
+    int pipPosition = 4;
+    long long lotSize = 100000;   // in cents (100000 = 1 lot)
+    long long minVolume = 1000;   // in cents
+    long long maxVolume = 10000000;
+    long long stepVolume = 1000;
+    double swapLong = 0.0;
+    double swapShort = 0.0;
+    int swapCalculationType = 0;  // 0=PIPS, 1=PERCENTAGE(annual), 2=POINTS
+    long long commissionRaw = 0;  // raw commission from SymbolByIdRes (moneyDigits scaled)
+    int commissionType = 0;       // 1=USD_PER_MIL_USD, 2=USD_PER_LOT, 3=PERCENTAGE, 4=QUOTE_CCY_PER_LOT
+    double bid = 0.0;
+    double ask = 0.0;
+    double high = 0.0;
+    double low = 0.0;
+    long long baseAssetId = 0;
+    long long quoteAssetId = 0;
+    bool subscribed = false;
+    long long lastQuoteTime = 0;
+    double marginPerLot = 0.0;       // from ExpectedMarginRes: margin for volume=10000 (1 Zorro lot)
+};
+
+// Trade/position info
+struct TradeInfo {
+    int zorroId = 0;
+    long long positionId = 0;
+    long long orderId = 0;
+    std::string symbol;
+    long long volume = 0;         // in cents
+    int tradeSide = 0;            // 1=Buy, 2=Sell
+    double openPrice = 0.0;
+    double closePrice = 0.0;       // set when position closes (from ExecutionEvent)
+    double stopLoss = 0.0;
+    double takeProfit = 0.0;
+    double profit = 0.0;
+    double commission = 0.0;
+    double swap = 0.0;
+    double usedMargin = 0.0;      // server-reported margin for this position
+    long long openTime = 0;
+    bool open = true;
+    bool reconciled = false;      // true = loaded from server at login, NOT opened by Zorro this session
+};
+
+// Pending action tracking
+struct PendingAction {
+    std::string msgId;
+    int zorroId = 0;
+    long long positionId = 0;
+    long long orderId = 0;
+    ULONGLONG sentTimeMs = 0;
+};
+
+// CSV credentials
+struct CsvCreds {
+    std::string clientId;
+    std::string clientSecret;
+    std::string type;             // "demo" or "live"
+    std::string accountId;
+    std::string accessToken;
+    std::string server;
+    bool hasExplicitEnv = false;
+    Env explicitEnv = Env::Demo;
+};
+
+// Central state - single source of truth
+struct State {
+    // Auth tokens
+    char accessToken[2048] = {};
+    char refreshToken[2048] = {};
+    char clientId[256] = {};
+    char clientSecret[256] = {};
+    long long accountId = 0;
+
+    // Environment - set ONCE at login, NEVER overwritten
+    Env env = Env::Demo;
+    bool envLocked = false;
+    std::string hostOverride;
+    std::string redirectUri;       // from CSV, e.g. "http://127.0.0.1:53123/callback"
+
+    // Per-instance tag (e.g. "Z1", "Z12") derived from the Zorro window title.
+    // Multiple Zorro instances can share one cTrader account; this tag makes
+    // position labels unique per strategy ("z_{id}__{tag}") so reconcile does
+    // not adopt another instance's positions. Empty = unknown (legacy behavior).
+    std::string instanceTag;
+
+    // Login state
+    bool loggedIn = false;
+    bool loginCompleted = false;
+
+    // WebSocket handles
+    HINTERNET hSession = NULL;
+    HINTERNET hConnect = NULL;
+    HINTERNET hWebSocket = NULL;
+    volatile bool wsConnected = false;
+
+    // Network thread
+    HANDLE hThread = NULL;
+    volatile bool running = false;
+
+    // Critical sections
+    CRITICAL_SECTION csSymbols;
+    CRITICAL_SECTION csTrades;
+    CRITICAL_SECTION csLog;
+    CRITICAL_SECTION csWebSocket;
+
+    // Symbols - SINGLE source!
+    std::map<std::string, SymbolInfo> symbols;       // name -> info
+    std::map<long long, std::string> symbolIdToName;  // reverse lookup
+
+    // Trades
+    std::map<int, TradeInfo> trades;                  // zorroId -> info
+    std::map<long long, int> posIdToZorroId;          // positionId -> zorroId
+    std::map<int, int> tradeIdAlias;                  // zorroTradeId -> actual zorroId (fallback cache)
+    std::map<std::string, PendingAction> pendingActions; // msgId -> action
+    int nextZorroId = 2;  // MUST start at 2! BrokerBuy2 return 0=rejected, 1=unfilled
+
+    // Account
+    double balance = 0.0;
+    double equity = 0.0;
+    double margin = 0.0;
+    double freeMargin = 0.0;
+
+    // Per-instance margin budget (% of equity), from Plugin\cTrader.ini
+    // "MaxMarginPct = 40". Caps the total margin THIS instance may use, so
+    // several strategies sharing one account cannot jointly overcommit it.
+    // 0 = disabled (only the account-wide free margin guard applies).
+    double maxMarginPct = 0.0;
+    int moneyDigits = 2;
+    long long leverageInCents = 0;  // from TraderRes: 50000 = 500:1
+    long long depositAssetId = 0;   // from TraderRes: account deposit currency asset ID
+    ULONGLONG accountRefreshMs = 0;  // last TraderReq/MarginChangedEvent timestamp (GetTickCount64)
+    volatile bool waitingForAccount = false;   // main thread waiting for TraderRes (2122)
+    volatile bool accountResponseReady = false; // NetworkThread signals TraderRes arrived
+
+    // Diagnostics
+    int diagLevel = 0;
+    char dllDir[MAX_PATH] = {};
+    char logPath[MAX_PATH] = {};
+
+    // Timing
+    ULONGLONG lastHeartbeatMs = 0;
+    long long lastServerTimestamp = 0;
+
+    // Message ID counter
+    int msgIdCounter = 0;
+
+    // Current state for BrokerCommand
+    std::string currentSymbol;
+    int orderType = 0;
+    int waitTime = 30000;  // default 30s timeout
+    double lastPositionAvgEntry = 0.0;  // cached for GET_AVGENTRY (set by GET_POSITION)
+
+    // Reconnect state
+    int reconnectAttempts = 0;
+    ULONGLONG lastReconnectMs = 0;
+    volatile bool isReconnecting = false;
+
+    // BrokerCommand state (F2)
+    std::string orderLabel;
+    double limitPrice = 0.0;
+
+    // AmendPositionSltp state (M5)
+    double pendingSL = 0.0;
+    double pendingTP = 0.0;
+
+    // Unrealized PnL cache (from GetPosUnrealizedPnLReq/Res 2187/2188)
+    struct PnLEntry { double gross = 0.0; double net = 0.0; };
+    std::map<long long, PnLEntry> pnlCache;  // positionId -> {gross, net}
+    ULONGLONG pnlCacheTimeMs = 0;            // last refresh timestamp
+    volatile bool waitingForPnL = false;      // main thread waiting for 2188 response
+    volatile bool pnlResponseReady = false;   // NetworkThread signals 2188 arrived
+
+    // Expected Margin cache (M7: per-symbol margin)
+    volatile bool waitingForMargin = false;
+    volatile bool marginResponseReady = false;
+    long long marginPendingSymbolId = 0;      // which symbol we sent ExpectedMarginReq for
+
+    // Currency conversion chains (M9: SymbolsForConversionReq/Res 2118/2119)
+    struct ConvChainEntry {
+        long long symbolId = 0;
+        long long baseAssetId = 0;
+        long long quoteAssetId = 0;
+    };
+    struct ConvInfo {
+        std::vector<ConvChainEntry> chain;  // ordered symbol chain
+        bool loaded = false;                // chain already fetched from server
+    };
+    // quoteAssetId → conversion chain to depositAssetId
+    // Shared across symbols with same quote currency (e.g., all xxxUSD)
+    std::map<long long, ConvInfo> quoteToDepositConv;
+    volatile bool waitingForConversion = false;
+    volatile bool conversionResponseReady = false;
+    static constexpr int CONV_BUF_SIZE = 32 * 1024;  // 32KB
+    char conversionResponseBuf[CONV_BUF_SIZE] = {};
+
+    // Subscription tracking
+    int quoteCount = 0;
+    ULONGLONG subscriptionStartMs = 0;
+    volatile ULONGLONG lastQuoteRecvMs = 0;  // GetTickCount64() of last SpotEvent
+
+    // History response mechanism (NetworkThread forwards to BrokerHistory2)
+    CRITICAL_SECTION csHistory;
+    volatile bool waitingForHistory = false;
+    volatile bool historyResponseReady = false;
+    volatile int historyResponsePt = 0;
+    static constexpr int HIST_BUF_SIZE = 2 * 1024 * 1024;  // 2MB for M1 data
+    char* historyResponseBuf = nullptr;  // heap-allocated in Init()
+
+    // Trading response mechanism (NetworkThread forwards to BrokerBuy2/Sell2)
+    CRITICAL_SECTION csTrading;
+    volatile bool waitingForTrading = false;
+    volatile bool tradingResponseReady = false;
+    volatile int tradingResponsePt = 0;
+    volatile int tradingResponseExecType = 0;
+    static constexpr int TRADE_BUF_SIZE = 64 * 1024;  // 64KB for execution events
+    char* tradingResponseBuf = nullptr;  // heap-allocated in Init()
+};
+
+extern State G;
+
+// Constants
+constexpr int PLUGIN_TYPE = 2;
+constexpr const char* PLUGIN_NAME = "cTraderJev";
+constexpr const char* PLUGIN_VERSION = "4.12.0-jev1";
+constexpr const char* CTRADER_HOST_DEMO = "demo.ctraderapi.com";
+constexpr const char* CTRADER_HOST_LIVE = "live.ctraderapi.com";
+constexpr int CTRADER_WS_PORT = 5036;
+constexpr ULONGLONG PING_INTERVAL_MS = 10000;  // API: 10s heartbeat, 30s disconnect
+constexpr double PRICE_SCALE = 100000.0;
+
+typedef double DATE;
+
+// T6 tick/bar struct (Zorro official format from include/trading.h)
+// CRITICAL: fields are FLOAT not double, and order is High,Low,Open,Close!
+#pragma pack(push, 4)
+typedef struct T6 {
+    DATE  time;           // GMT timestamp of fClose (8 bytes, double)
+    float fHigh, fLow;    // (f1,f2) - 4+4 bytes
+    float fOpen, fClose;   // (f3,f4) - 4+4 bytes
+    float fVal, fVol;      // additional data: spread and volume (f5,f6) - 4+4 bytes
+} T6;  // = 32 bytes total
+#pragma pack(pop)
+
+namespace StateInit {
+    void Init();
+    void Destroy();
+    void Reset();              // Full session reset (clear symbols, trades, account, timing)
+    void ResetConnection();    // Soft reset for reconnect (preserve trades, symbols, account)
+}
