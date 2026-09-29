@@ -5,6 +5,7 @@
 #include "../include/symbols.h"
 #include "../include/logger.h"
 #include "../include/utils.h"
+#include "../jevgate/jevgate.h"
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -286,6 +287,12 @@ int BuyOrder(const char* asset, int amount, double stopDist, double limit,
                        asset, myUsed, estMargin, budget, G.maxMarginPct, G.equity);
             return 0;
         }
+    }
+
+    // Jev gate (Plugin\JevGate\JevGate.ini, handled separately in jevgate/):
+    // asks the local Jev server before a NEW position; off when the file is missing.
+    if (!JevGate::Allow(asset, tradeSide, sym)) {
+        return 0;
     }
 
     // Determine order type from G.orderType (set by SET_ORDERTYPE)

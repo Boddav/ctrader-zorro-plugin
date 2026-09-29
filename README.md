@@ -43,6 +43,15 @@ cannot stop two strategies on the same account from filling it up together.
 `MaxMarginPct` caps the total margin *this* instance may hold, leaving a
 buffer for open-trade drawdown and preventing shared-account margin calls.
 
+### JevGate (optional, separate subfolder)
+An optional gate asks a local Jev (TypeSafe AI) server before every **new** position
+(`BrokerBuy2`), without touching the strategy code — e.g. for closed-source Z systems.
+Configured in its own folder, independent of `cTrader.ini`:
+`<Zorro>\Plugin\JevGate\JevGate.ini` (sample and details in
+`source/repos/zorro-plugin-windows-32-4/jevgate/`). Modes: `off` (default, file missing),
+`log` (ask and record in `JevGate_log.csv`, never block), `enforce` (reject below `MinProb`).
+Closing orders are never gated. Server: `JevServer.py` from Boddav/ai-trading-advisor (`/gate`).
+
 ## Current version: v4.12.0
 
 ### Core features
