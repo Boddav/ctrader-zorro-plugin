@@ -98,10 +98,12 @@
     <ClCompile Include="src\account.cpp" />
     <ClCompile Include="src\trading.cpp" />
     <ClCompile Include="jevgate\jevgate.cpp" />
+    <ClCompile Include="jevdepth\jevdepth.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\state.h" />
     <ClInclude Include="jevgate\jevgate.h" />
+    <ClInclude Include="jevdepth\jevdepth.h" />
     <ClInclude Include="include\logger.h" />
     <ClInclude Include="include\utils.h" />
     <ClInclude Include="include\protocol.h" />

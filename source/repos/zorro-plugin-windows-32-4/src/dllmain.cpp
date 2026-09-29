@@ -1,4 +1,5 @@
 #include "../include/state.h"
+#include "../jevdepth/jevdepth.h"
 #include "../include/protocol.h"
 #include "../include/websocket.h"
 #include "../include/auth.h"
@@ -334,6 +335,14 @@ static unsigned __stdcall NetworkThread(void* param) {
                 Account::HandleTraderUpdateEvent(buffer);
                 break;
 
+            case ToInt(PayloadType::DepthEvent):
+                JevDepth::HandleDepthEvent(buffer);
+                break;
+
+            case ToInt(PayloadType::SubscribeDepthQuotesRes):
+                Log::Diag(1, "SubscribeDepthQuotesRes received");
+                break;
+
             case ToInt(PayloadType::SubscribeSpotsRes):
                 Log::Diag(1, "SubscribeSpotsRes received");
                 break;
@@ -420,6 +429,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         if (lastSlash) *(lastSlash + 1) = '\0';
 
         StateInit::Init();
+        JevDepth::Init();  // jevdepth/: Depth of Market for GET_BOOK
     }
     else if (reason == DLL_PROCESS_DETACH) {
         StopNetworkThread();
@@ -1504,6 +1514,9 @@ DLLFUNC double BrokerCommand(int Command, DWORD dwParameter) {
             G.diagLevel = (int)dwParameter;
             Log::Info("CMD", "Diagnostics level set to %d", G.diagLevel);
             return G.diagLevel;
+
+        case JEVDEPTH_GET_BOOK: // 62 - order book (jevdepth/), T2 array in dwParameter
+            return JevDepth::GetBook((T2*)dwParameter, JEVDEPTH_MAX_QUOTES);
 
         case SET_SYMBOL: // 132
             if (dwParameter) {

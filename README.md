@@ -43,6 +43,11 @@ cannot stop two strategies on the same account from filling it up together.
 `MaxMarginPct` caps the total margin *this* instance may hold, leaving a
 buffer for open-trade drawdown and preventing shared-account margin calls.
 
+### Depth of Market (separate subfolder)
+`BrokerCommand(GET_BOOK)` (62) returns the cTrader order book for the symbol set with
+`SET_SYMBOL` as a T2 array (bids negative, asks positive, best first, max 40 levels).
+Live only. Code and notes: `source/repos/zorro-plugin-windows-32-4/jevdepth/`.
+
 ### JevGate (optional, separate subfolder)
 An optional gate asks a local Jev (TypeSafe AI) server before every **new** position
 (`BrokerBuy2`), without touching the strategy code — e.g. for closed-source Z systems.
