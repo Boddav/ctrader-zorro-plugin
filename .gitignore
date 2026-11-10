@@ -1,0 +1,42 @@
+# Visual Studio local settings and caches
+.vs/
+*.suo
+*.user
+*.VC.db
+*.VC.VC.opendb
+ipch/
+
+# Visual C++ build output and intermediate directories
+[Dd]ebug/
+[Rr]elease/
+Win32/
+x64/
+x86/
+ARM/
+ARM64/
+
+# Compiled binaries and intermediate files
+*.dll
+*.exe
+*.obj
+*.pdb
+*.idb
+*.ilk
+*.lib
+*.exp
+*.pch
+*.res
+*.tlog
+*.lastbuildstate
+*.recipe
+*.iobj
+*.ipdb
+
+# Runtime logs and generated authentication tokens
+*.log
+oauth_token.json
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/

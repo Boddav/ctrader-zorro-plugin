@@ -16,6 +16,9 @@ static std::string FindSymbolName(const char* name);
 
 bool RequestSymbolList() {
     const int MAX_RETRIES = 3;
+    // Match the parser/network capacity without putting 2 MB on the Win32 stack.
+    std::vector<char> responseStorage(2 * 1024 * 1024);
+    char* response = responseStorage.data();
 
     for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         char payload[128];
@@ -30,10 +33,9 @@ bool RequestSymbolList() {
         }
 
         // Wait for response
-        char response[131072] = {0};
         ULONGLONG start = Utils::NowMs();
         while (Utils::NowMs() - start < (ULONGLONG)G.waitTime) {
-            int n = WebSocket::Receive(response, sizeof(response));
+            int n = WebSocket::Receive(response, static_cast<int>(responseStorage.size()));
             if (n > 0) {
                 int pt = Protocol::ExtractPayloadType(response);
                 if (pt == ToInt(PayloadType::SymbolsListRes)) {
@@ -102,6 +104,8 @@ bool RequestSymbolDetails() {
 
     // Send in batches of 50
     const int BATCH = 50;
+    std::vector<char> responseStorage(2 * 1024 * 1024);
+    char* response = responseStorage.data();
     for (size_t offset = 0; offset < ids.size(); offset += BATCH) {
         size_t end = (offset + BATCH < ids.size()) ? offset + BATCH : ids.size();
 
@@ -122,10 +126,9 @@ bool RequestSymbolDetails() {
         if (!WebSocket::Send(msg)) return false;
 
         // Wait for response
-        char response[131072] = {0};
         ULONGLONG start = Utils::NowMs();
         while (Utils::NowMs() - start < (ULONGLONG)G.waitTime) {
-            int n = WebSocket::Receive(response, sizeof(response));
+            int n = WebSocket::Receive(response, static_cast<int>(responseStorage.size()));
             if (n > 0) {
                 int pt = Protocol::ExtractPayloadType(response);
                 if (pt == ToInt(PayloadType::SymbolByIdRes)) {
