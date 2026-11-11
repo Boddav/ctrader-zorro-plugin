@@ -27,15 +27,27 @@ minimal row only needs the account and `Server = Ctrader`.
 
 ### cTrader.ini (optional risk config)
 Place `cTrader.ini` in the **same folder as the DLL** (`Plugin/`). It is
-read once at login. Currently supported key:
+with `LogLevel` read when the plugin opens and `MaxMarginPct` read at login.
+Supported keys:
 
 ```ini
+; File logging: 0=off, 1=errors, 2=warnings, 3=info (default), 4=verbose.
+LogLevel = 3
+
 ; This Zorro instance may use at most this % of account equity as margin.
 ; When several strategies share ONE cTrader account, give each a slice so
 ; they cannot jointly overcommit the account (e.g. two strategies at 40 => 80%).
 ; 0 or the file missing = disabled (only the account-wide 90% guard applies).
 MaxMarginPct = 40
 ```
+
+`LogLevel` filters `Log/cTrader.log`. Each level includes the lower levels;
+level 4 also enables diagnostic request/response logging, which can contain
+credentials, tokens, and account data. Error notifications and user messages
+still appear in Zorro even when file logging is off. Missing or invalid values
+default to 3. Restart Zorro to apply changes to `LogLevel`.
+At level 3, the existing Zorro diagnostics command continues to work; level 4
+enables file diagnostics without changing that command's TLS settings.
 
 **Why it matters:** each Zorro instance runs its own copy of the plugin and
 sees the *whole* account's free margin, so the built-in per-order guard alone

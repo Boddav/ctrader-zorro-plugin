@@ -3,8 +3,31 @@
 #include <cstdio>
 #include <cstdarg>
 #include <ctime>
+#include <atomic>
+#include <fstream>
+#include <string>
+#include "../include/utils.h"
 
 namespace Log {
+
+// 0=off, 1=errors, 2=warnings, 3=info (default), 4=diagnostics.
+static std::atomic<int> logLevel{3};
+
+void LoadConfig() {
+    logLevel = 3;
+    std::ifstream file(std::string(G.dllDir) + "cTrader.ini");
+    std::string line;
+    while (std::getline(file, line)) {
+        line = line.substr(0, line.find_first_of(";#"));
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = Utils::Trim(line.substr(0, eq));
+        if (_stricmp(key.c_str(), "LogLevel") != 0) continue;
+        const std::string value = Utils::Trim(line.substr(eq + 1));
+        if (value.size() == 1 && value[0] >= '0' && value[0] <= '4')
+            logLevel = value[0] - '0';
+    }
+}
 
 static void WriteToFile(const char* tag, const char* message) {
     if (!tag || !message) return;
@@ -27,10 +50,12 @@ static void WriteToFile(const char* tag, const char* message) {
 }
 
 void ToFile(const char* tag, const char* message) {
+    if (logLevel < 3) return;
     WriteToFile(tag, message);
 }
 
 void Info(const char* tag, const char* fmt, ...) {
+    if (logLevel < 3) return;
     char buf[4096];
     va_list args;
     va_start(args, fmt);
@@ -40,6 +65,7 @@ void Info(const char* tag, const char* fmt, ...) {
 }
 
 void Warn(const char* tag, const char* fmt, ...) {
+    if (logLevel < 2) return;
     char buf[4096];
     va_list args;
     va_start(args, fmt);
@@ -60,7 +86,7 @@ void Error(const char* tag, const char* fmt, ...) {
 
     char full[4096];
     sprintf_s(full, "[ERROR] %s", buf);
-    WriteToFile(tag ? tag : "ERROR", full);
+    if (logLevel >= 1) WriteToFile(tag ? tag : "ERROR", full);
 
     if (BrokerMessage) {
         BrokerMessage(full);
@@ -69,14 +95,15 @@ void Error(const char* tag, const char* fmt, ...) {
 
 void Msg(const char* text) {
     if (!text) return;
-    WriteToFile("MSG", text);
+    if (logLevel >= 3) WriteToFile("MSG", text);
     if (BrokerMessage) {
         BrokerMessage(text);
     }
 }
 
 void Diag(int level, const char* fmt, ...) {
-    if (G.diagLevel < level) return;
+    const int configuredLevel = logLevel.load();
+    if (configuredLevel < 3 || (configuredLevel < 4 && G.diagLevel < level)) return;
 
     char buf[4096];
     va_list args;

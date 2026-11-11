@@ -450,43 +450,10 @@ DLLFUNC int BrokerOpen(char* Name, int(__cdecl* fpMessage)(const char*),
 
     strcpy_s(Name, 32, PLUGIN_NAME);
 
-    // Debug: write version + dllDir + log test to known path
-    {
-        char dbgPath[MAX_PATH];
-        sprintf_s(dbgPath, "%scTrader_debug.txt", G.dllDir);
-        FILE* dbg = nullptr;
-        fopen_s(&dbg, dbgPath, "w");
-        if (dbg) {
-            fprintf(dbg, "BrokerOpen v%s\ndllDir=[%s]\n", PLUGIN_VERSION, G.dllDir);
-
-            // Test: can we open cTrader.log?
-            char logPath[MAX_PATH];
-            sprintf_s(logPath, "%scTrader.log", G.dllDir);
-            FILE* logTest = nullptr;
-            errno_t logErr = fopen_s(&logTest, logPath, "a");
-            fprintf(dbg, "log fopen_s(\"%s\",\"a\") = %d (f=%p)\n", logPath, (int)logErr, (void*)logTest);
-            if (logTest) {
-                fprintf(logTest, "[DEBUG] direct write test from BrokerOpen v%s\n", PLUGIN_VERSION);
-                fclose(logTest);
-                fprintf(dbg, "log direct write OK\n");
-            }
-
-            // Test: is csLog initialized?
-            fprintf(dbg, "csLog ptr=%p\n", (void*)&G.csLog);
-            BOOL tryResult = TryEnterCriticalSection(&G.csLog);
-            fprintf(dbg, "TryEnterCriticalSection(csLog) = %d\n", tryResult);
-            if (tryResult) {
-                LeaveCriticalSection(&G.csLog);
-                fprintf(dbg, "csLog OK - enter+leave succeeded\n");
-            } else {
-                fprintf(dbg, "csLog LOCKED by another thread!\n");
-            }
-
-            fclose(dbg);
-        }
-    }
-
+    // Apply file logging settings before writing startup diagnostics.
+    Log::LoadConfig();
     Log::Info("BROKER", "BrokerOpen - %s v%s", PLUGIN_NAME, PLUGIN_VERSION);
+    Log::Diag(1, "BrokerOpen: dllDir=[%s]", G.dllDir);
 
     // Show version in Zorro message window
     if (BrokerMessage) {
