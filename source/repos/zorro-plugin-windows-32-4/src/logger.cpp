@@ -12,7 +12,7 @@ static void WriteToFile(const char* tag, const char* message) {
     CsLock lock(G.csLog);
 
     char path[MAX_PATH];
-    sprintf_s(path, "%scTrader.log", G.dllDir);
+    sprintf_s(path, sizeof(path), "%s../Log/cTrader.log", G.dllDir);
 
     FILE* f = nullptr;
     if (fopen_s(&f, path, "a") == 0 && f) {
